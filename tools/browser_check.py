@@ -12,11 +12,10 @@ Mobile part (--mobile; needs `pip install playwright`, uses channel="msedge", no
 tools/mobile_check.py emulates 390x844, 414x896, 360x780 (DPR 3), 768x1024 (DPR 2) with touch, plus
 desktop 1920x1080 and 1366x768, and this module adds the scenario assertions of the v2 spec:
   - no horizontal overflow (generic) and no JS errors (generic);
-  - 观战: the brain panel is below the board, compact and inside the viewport width;
-  - 我来玩: the whole page does not scroll (scrollHeight <= innerHeight); a touch drag on the joystick
-    changes the snake's direction (up, then right); the big round key pauses / resumes;
-  - 「看大脑」 opens the full-screen brain sheet and 「返回游戏」 closes it; ☰ menu opens / closes;
-  - the help overlay shows the touch illustration (no keyboard list) on touch devices.
+  - the brain panel is below the board, compact and inside the viewport width (phones);
+  - tapping the full-layer square knocks out a channel and 「全部恢复」 restores it; ☰ menu opens / closes;
+  - every brain can be switched to (board 12x12 / 10x10 follows) and keeps advancing;
+  - brain B's guard switch and the policy buttons work; the help overlay shows the touch list on touch devices.
 Only one Edge runs on the machine at a time (file lock in tools/mobile_check.py) and it waits for
 >= 1.5 GB free memory before starting. Only the processes started here are terminated.
 """
@@ -148,9 +147,10 @@ def screenshot(exe, size, query, path):
 
 
 SHOTS = [
-    ("watch_1920x1080.png", (1920, 1080), "shot=watch&steps=37"),
-    ("play_1920x1080.png", (1920, 1080), "shot=play&steps=14"),
-    ("knockout_1366x768.png", (1366, 768), "shot=knock&steps=25"),
+    ("watch_1920x1080.png", (1920, 1080), "shot=watch&brain=ppo_linyi&steps=260"),
+    ("brain_b_1920x1080.png", (1920, 1080), "shot=watch&brain=ppo_ray&steps=180"),
+    ("dqn_1920x1080.png", (1920, 1080), "shot=watch&brain=dqn_own&steps=37"),
+    ("knockout_1366x768.png", (1366, 768), "shot=knock&brain=ppo_linyi&steps=120"),
 ]
 
 
@@ -256,132 +256,80 @@ def mobile_scenario(shots_dir):
             if not cond:
                 fails.append(msg)
 
-        # 0. first visit: the help overlay is open; on touch it must show the touch illustration, not the keyboard list
+        tap = page.tap if mobile else page.click
+        # 0. first visit: the help overlay is open; on touch it must show the touch list, not the keyboard list
         check(page.evaluate("!document.getElementById('help').hidden"), "首次打开没有弹出操作说明")
         if mobile:
             check(page.evaluate("document.body.classList.contains('touchp')"), "触屏竖屏没有加上 body.touchp")
-            check(_rect(page, ".demo-stick")["vis"], "触屏说明没有显示摇杆图解")
+            check(_rect(page, ".touch-list")["vis"], "触屏说明没有显示触屏操作列表")
             check(not _rect(page, ".keys-list")["vis"], "触屏说明仍显示键盘列表")
             hc = _rect(page, "#help-close")
             check(hc and hc["y"] + hc["h"] <= size["h"] + 1, "说明浮层的「开始」按钮不在视口内")
-            page.tap("#help-close")
         else:
             check(not page.evaluate("document.body.classList.contains('touchp')"), "电脑尺寸误判为手机竖屏")
-            page.click("#help-close")
+        tap("#help-close")
         page.wait_for_timeout(200)
         check(page.evaluate("document.getElementById('help').hidden"), "操作说明关不掉")
 
-        # 1. 观战 (default): brain panel visible; on phones it sits below the board and fits the width
-        check(page.evaluate("window.__app && window.__app.mode() === 'watch'"), "默认模式不是观战")
-        page.wait_for_timeout(700)
-        check(page.evaluate("window.__app.watchSteps() > 0"), "观战模式没有前进")
+        # 1. default brain plays; the brain panel is visible (phones: below the board, inside the viewport width)
+        check(page.evaluate("window.__app && window.__app.brain() === 'ppo_linyi'"), "默认大脑不是 ppo_linyi")
+        page.wait_for_timeout(900)
+        check(page.evaluate("window.__app.watchSteps() > 0"), "观看模式没有前进")
         right, board, fc = _rect(page, "#right"), _rect(page, "#board"), _rect(page, "#fc-canvas")
         check(right and right["vis"] and fc and fc["vis"], "大脑面板不可见")
         if mobile:
-            check(right["y"] >= board["y"] + board["h"] - 1, "手机观战：大脑面板不在棋盘下方")
-            check(right["x"] >= -1 and right["x"] + right["w"] <= size["w"] + 1, "手机观战：大脑面板超出屏幕宽度")
-            check(fc["x"] + fc["w"] <= size["w"] + 1, "手机观战：全连接层画布超出屏幕宽度")
-            check(board["w"] >= min(size["w"] * 0.8, 600), "手机观战：棋盘没有按宽度缩放（%.0f / %d）" % (board["w"], size["w"]))
+            check(right["y"] >= board["y"] + board["h"] - 1, "手机：大脑面板不在棋盘下方")
+            check(right["x"] >= -1 and right["x"] + right["w"] <= size["w"] + 1, "手机：大脑面板超出屏幕宽度")
+            check(fc["x"] + fc["w"] <= size["w"] + 1, "手机：全连接层画布超出屏幕宽度")
+            check(board["w"] >= min(size["w"] * 0.8, 600), "手机：棋盘没有按宽度缩放（%.0f / %d）" % (board["w"], size["w"]))
             inrow = _rect(page, "#row-input")
-            check(inrow and inrow["h"] < 160, "手机观战：输入层 5 张图换行了（高 %.0f）" % (inrow["h"] if inrow else -1))
+            check(inrow and inrow["h"] < 160, "手机：输入层的图换行了（高 %.0f）" % (inrow["h"] if inrow else -1))
             check(page.evaluate("window.__app.kConv()") <= 6, "kConv")
             # ☰ menu opens and closes
             page.tap("#menu-btn"); page.wait_for_timeout(150)
             check(page.evaluate("!document.getElementById('menu').hidden"), "☰ 菜单打不开")
             page.tap("#menu-btn"); page.wait_for_timeout(150)
             check(page.evaluate("document.getElementById('menu').hidden"), "☰ 菜单关不掉")
-            # knock out one conv channel by tapping the full-layer square, then restore from the menu
-            page.evaluate("document.getElementById('sq-conv1').scrollIntoView({block: 'center'})"); page.wait_for_timeout(150)
-            page.tap("#sq-conv1", position={"x": 6, "y": 6}); page.wait_for_timeout(200)
-            check(page.evaluate("window.__app.knocked() === 1"), "手机观战：点方阵没有敲掉神经元")
-            page.tap("#menu-btn"); page.wait_for_timeout(100); page.tap("#menu-restore"); page.wait_for_timeout(200)
-            check(page.evaluate("window.__app.knocked() === 0"), "菜单「全部恢复」没有恢复")
-            if name == MOBILE_SHOT_SIZE and shots_dir:
-                page.evaluate("window.scrollTo(0, 0)"); page.wait_for_timeout(100)
-                page.screenshot(path=str(Path(shots_dir) / "mobile_watch_390x844.png"))
-                page.evaluate("document.getElementById('right').scrollIntoView({block: 'start'})"); page.wait_for_timeout(150)
-                page.screenshot(path=str(Path(shots_dir) / "mobile_brain_390x844.png"))
-                page.evaluate("window.scrollTo(0, 0)")
-
-        # 2. 我来玩
-        page.evaluate("window.scrollTo(0, 0)")
-        (page.tap if mobile else page.click)("#tabs .tab[data-mode=play]"); page.wait_for_timeout(300)
-        check(page.evaluate("window.__app.mode() === 'play'"), "切不到「我来玩」")
-        if mobile:
-            check(_no_scroll(page), "手机「我来玩」整页还能滚动（scrollHeight > innerHeight）")
-            tc, bd = _rect(page, "#touchctl"), _rect(page, "#board")
-            check(tc and tc["vis"] and tc["y"] + tc["h"] <= size["h"] + 1, "操作区不在视口内")
-            check(bd and bd["y"] >= 0 and bd["y"] + bd["h"] <= (tc["y"] if tc else size["h"]) + 1, "棋盘不在视口内或与操作区重叠")
-            check(bd["w"] >= 150, "棋盘太小")
-            check(not _rect(page, "#right")["vis"], "手机「我来玩」大脑面板没有默认收起")
-            big = _rect(page, "#tk-pause")
-            check(big and big["w"] >= 64 and big["h"] >= 64, "大圆键小于 64px")
-            # joystick: a touch drag up (initial direction is right = 3), then right; the snake must follow (turn-based: one step each)
-            zone = _rect(page, "#stick-zone")
-            cx, cy = zone["x"] + zone["w"] / 2, zone["y"] + zone["h"] * 0.6
-            steps0 = page.evaluate("window.__app.playSteps()")
-            _touch_drag(page, cx, cy, cx, cy - 70); page.wait_for_timeout(250)
-            check(page.evaluate("window.__app.playDir() === 0"), "摇杆向上拖后蛇的方向不是上（%r）" % page.evaluate("window.__app.playDir()"))
-            _touch_drag(page, cx, cy, cx + 70, cy); page.wait_for_timeout(250)
-            check(page.evaluate("window.__app.playDir() === 3"), "摇杆向右拖后蛇的方向不是右（%r）" % page.evaluate("window.__app.playDir()"))
-            check(page.evaluate("window.__app.playSteps()") == steps0 + 2, "回合制：两次拖摇杆应各走一步")
-            check(page.evaluate("document.getElementById('touchctl').getAttribute('data-dir') === '-1'"), "松手后摇杆没有回中")
-            tc2 = _rect(page, "#touchctl")
-            check(tc2 and abs(tc2["y"] - tc["y"]) <= 1 and tc2["y"] + tc2["h"] <= size["h"] + 1, "走几步后操作区位置变了 / 被挤出视口（y %.0f → %.0f）" % (tc["y"], tc2["y"]))
-            check(_no_scroll(page), "走几步后整页可以滚动了")
-            if name == MOBILE_SHOT_SIZE and shots_dir:
-                # README shot: joystick held to the right, game in progress
-                cdp = page.context.new_cdp_session(page)
-                cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": cx, "y": cy, "id": 1}]})
-                cdp.send("Input.dispatchTouchEvent", {"type": "touchMove", "touchPoints": [{"x": cx + 40, "y": cy, "id": 1}]})
-                page.wait_for_timeout(150)
-                page.screenshot(path=str(Path(shots_dir) / "mobile_play_390x844.png"))
-                cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []}); cdp.detach()
-                page.wait_for_timeout(100)
-            # big key: in turn-based mode it is 「直走」 = one straight step (the README shot above may have added a step)
-            s0 = page.evaluate("window.__app.playSteps()")
-            page.tap("#tk-pause"); page.wait_for_timeout(200)
-            check(page.evaluate("window.__app.playSteps()") == s0 + 1, "大圆键「直走」没有走一步")
-            # timed level (new game): the big key starts, pauses and resumes
-            page.tap("#mob-levels .preset[data-i='2']"); page.wait_for_timeout(150)
-            page.tap("#b-mnext"); page.wait_for_timeout(200)
-            lv = page.evaluate("(() => { const b = document.querySelector('#mob-levels .preset.on'); return {on: b ? b.dataset.i : null, html: document.getElementById('mob-levels').innerHTML.slice(0, 200), ms: window.__app.playMs()}; })()")
-            check(lv["on"] == "2", "顶部一行的难度档位点不中: %r" % (lv,))
-            check(page.evaluate("document.getElementById('tk-pause').textContent") == "开始", "限时档位新一局大圆键不是「开始」")
-            steps0 = page.evaluate("window.__app.playSteps()")
-            page.tap("#tk-pause"); page.wait_for_timeout(700)
-            check(page.evaluate("document.getElementById('tk-pause').textContent") == "暂停", "开始后大圆键不是「暂停」")
-            s1 = page.evaluate("window.__app.playSteps()")
-            check(s1 > steps0, "限时档位开始后蛇没有自动前进")
-            page.tap("#tk-pause"); page.wait_for_timeout(600)
-            s2 = page.evaluate("window.__app.playSteps()")
-            page.wait_for_timeout(600)
-            check(page.evaluate("window.__app.playSteps()") == s2, "暂停后蛇还在走")
-            check(page.evaluate("document.getElementById('tk-pause').textContent") == "继续", "暂停后大圆键不是「继续」")
-            check(_no_scroll(page), "操作后整页可以滚动了")
-            # 「看大脑」 sheet opens / closes
-            page.tap("#btn-brain"); page.wait_for_timeout(300)
-            check(page.evaluate("window.__app.sheet() && document.body.classList.contains('sheet-brain')"), "「看大脑」没有打开")
-            r2 = _rect(page, "#right")
-            check(r2 and r2["vis"] and r2["w"] >= size["w"] - 2, "「看大脑」面板不是全屏")
-            check(_rect(page, "#brain-close")["vis"], "「返回游戏」按钮不可见")
-            if name == MOBILE_SHOT_SIZE and shots_dir:
-                page.screenshot(path=str(Path(shots_dir) / "mobile_sheet_390x844.png"))
-            page.tap("#brain-close"); page.wait_for_timeout(250)
-            check(not page.evaluate("window.__app.sheet()") and not _rect(page, "#right")["vis"], "「返回游戏」没有关闭大脑面板")
-            check(_no_scroll(page), "关闭大脑面板后整页可以滚动")
         else:
-            # desktop: keyboard play works and the right column is visible next to the board
-            page.keyboard.press("ArrowUp"); page.wait_for_timeout(150)
-            check(page.evaluate("window.__app.playDir() === 0"), "电脑：方向键没有改变方向")
-            right, board = _rect(page, "#right"), _rect(page, "#board")
             check(right["x"] >= board["x"] + board["w"], "电脑：大脑面板不在右栏")
-            check(not _rect(page, "#touchctl")["vis"], "电脑上显示了触屏操作区")
 
-        # 3. 练习 then back to 观战: no overflow (generic check runs after the scenario)
-        (page.tap if mobile else page.click)("#tabs .tab[data-mode=practice]"); page.wait_for_timeout(250)
-        check(page.evaluate("window.__app.mode() === 'practice'"), "切不到「练习」")
-        (page.tap if mobile else page.click)("#tabs .tab[data-mode=watch]"); page.wait_for_timeout(250)
+        # 2. knock out one conv channel by tapping the full-layer square, then restore
+        page.evaluate("document.getElementById('sq-conv1').scrollIntoView({block: 'center'})"); page.wait_for_timeout(150)
+        tap("#sq-conv1", position={"x": 6, "y": 6}); page.wait_for_timeout(250)
+        check(page.evaluate("window.__app.knocked() === 1"), "点方阵没有敲掉神经元")
+        if mobile:
+            page.tap("#menu-btn"); page.wait_for_timeout(100); page.tap("#menu-restore"); page.wait_for_timeout(250)
+        else:
+            page.click("#btn-restore"); page.wait_for_timeout(250)
+        check(page.evaluate("window.__app.knocked() === 0"), "「全部恢复」没有恢复")
+        if mobile and name == MOBILE_SHOT_SIZE and shots_dir:
+            page.evaluate("window.scrollTo(0, 0); document.getElementById('toast').classList.remove('show')"); page.wait_for_timeout(400)
+            page.screenshot(path=str(Path(shots_dir) / "mobile_watch_390x844.png"))
+            page.evaluate("document.getElementById('right').scrollIntoView({block: 'start'})"); page.wait_for_timeout(150)
+            page.screenshot(path=str(Path(shots_dir) / "mobile_brain_390x844.png"))
+
+        # 3. switch brains: board size and panel follow; every brain advances
+        page.evaluate("window.scrollTo(0, 0)")
+        for bid, n in (("ppo_ray", 12), ("ppo_mlp_linyi", 12), ("dqn_own", 10), ("ppo_linyi", 12)):
+            tap("#opts .preset[data-kind=brain][data-id=%s]" % bid); page.wait_for_timeout(700)
+            check(page.evaluate("window.__app.brain()") == bid, "切不到大脑 %s" % bid)
+            check(page.evaluate("window.__app.n()") == n, "大脑 %s 的棋盘不是 %d×%d" % (bid, n, n))
+            check(page.evaluate("window.__app.watchSteps() > 0"), "大脑 %s 没有前进" % bid)
+            check(_rect(page, "#fc-canvas")["vis"], "大脑 %s 的面板没有画出来" % bid)
+            if mobile:
+                r2 = _rect(page, "#right")
+                check(r2["x"] + r2["w"] <= size["w"] + 1, "手机：大脑 %s 的面板超出屏幕宽度" % bid)
+            if mobile and bid == "ppo_ray" and name == MOBILE_SHOT_SIZE and shots_dir:
+                page.evaluate("window.scrollTo(0, 0); document.getElementById('toast').classList.remove('show')"); page.wait_for_timeout(400)
+                page.screenshot(path=str(Path(shots_dir) / "mobile_brain_b_390x844.png"))
+        # 4. the guard switch of brain B and the policy buttons
+        tap("#opts .preset[data-kind=brain][data-id=ppo_ray]"); page.wait_for_timeout(300)
+        check(page.evaluate("window.__app.guard() === true"), "大脑 B 默认没有开护栏")
+        tap("#ck-guard"); page.wait_for_timeout(200)
+        check(page.evaluate("window.__app.guard() === false"), "护栏开关没有关掉")
+        tap("#opts .preset[data-kind=policy][data-v=sample]"); page.wait_for_timeout(200)
+        check(page.evaluate("window.__app.policy() === 'sample'"), "选动作没有切到抽样")
+        tap("#opts .preset[data-kind=brain][data-id=ppo_linyi]"); page.wait_for_timeout(300)
         page.evaluate("window.scrollTo(0, 0)")
         return fails
     return scenario

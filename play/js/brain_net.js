@@ -1,12 +1,16 @@
-/* SnakeCNN (model.py) in plain JavaScript: forward pass + the gradient of the chosen
- * action's Q value w.r.t. every layer, computed by hand-written backpropagation.
+/* Generic policy network in plain JavaScript: forward pass + the gradient of the chosen output
+ * w.r.t. every layer, by hand-written backpropagation (no libraries, runs from file://).
  *
- *   input 5xNxN -> conv3x3(32)+ReLU -> conv3x3(64)+ReLU -> conv3x3(64)+ReLU
- *               -> FC 256 + ReLU -> FC 4 (Q values: up, down, left, right)
- *
- * Weights come from window.SNAKE_MODEL (float16, exported by tools/export_model.py).
- * "Knock-out" masks multiply a unit's post-ReLU activation by 0 (conv: whole channel).
- * Locked against PyTorch by tests/test_play_parity.py.
+ * A model file (play/model/*.js) carries float16 weights (base64) and a `spec`:
+ *   input  {c, h, w}
+ *   trunk  conv / fc layers, ReLU after each            (shared by the policy and the value head)
+ *   pi     fc layers; ReLU after all but the last        (last = 4 action scores: logits or Q values)
+ *   v      fc layers; ReLU after all but the last        (last = 1 state value; may be empty)
+ *   actionMap  brain action index -> env action (0=up 1=down 2=left 3=right)
+ *   mask   "turn" | "safe" | "none"   the action mask the model was trained with
+ * The original DQN export (format fp16-b64-v1) only has n / channels; its spec is rebuilt here.
+ * "Knock-out" multiplies a unit's post-ReLU activation by 0 (conv: a whole channel).
+ * Locked against the NumPy reference brains.py by tests/test_play_parity.py.
  */
 (function (g) {
   "use strict";
@@ -26,10 +30,20 @@
     return out;
   }
 
+  /** Spec for the v1 DQN export: 3 x conv3x3(pad 1) -> fc 256 -> fc 4 (Q values). */
+  function specFromV1(meta) {
+    var n = meta.n, ch = meta.channels;
+    function conv(name, cin, cout) { return { name: name, kind: "conv", cin: cin, cout: cout, k: 3, s: 1, p: 1, hin: n, win: n, hout: n, wout: n }; }
+    return { obs: "dqn5", n: n, input: { c: ch, h: n, w: n },
+             trunk: [conv("conv1", ch, 32), conv("conv2", 32, 64), conv("conv3", 64, 64), { name: "fc1", kind: "fc", "in": 64 * n * n, out: 256 }],
+             pi: [{ name: "fc2", kind: "fc", "in": 256, out: 4 }], v: [], actionMap: [0, 1, 2, 3], mask: "turn", out: "q" };
+  }
+
   function BrainNet(payload) {
     var flat = decodeFp16(payload.b64);
-    this.meta = payload.meta;
-    this.n = payload.meta.n;
+    this.meta = payload.meta || {};
+    this.spec = payload.spec || specFromV1(payload.meta);
+    this.n = this.spec.n;
     this.w = {};
     this.shapes = {};
     for (var i = 0; i < payload.tensors.length; i++) {
@@ -37,24 +51,42 @@
       this.w[t.name] = flat.subarray(t.offset, t.offset + t.length);
       this.shapes[t.name] = t.shape;
     }
-    this.C = [payload.meta.channels, this.shapes["conv1.weight"][0],
-              this.shapes["conv2.weight"][0], this.shapes["conv3.weight"][0]];
-    this.H = this.shapes["fc1.weight"][0];
-    this.A = this.shapes["fc2.weight"][0];
-    this.masks = {
-      conv1: new Float32Array(this.C[1]).fill(1), conv2: new Float32Array(this.C[2]).fill(1),
-      conv3: new Float32Array(this.C[3]).fill(1), fc1: new Float32Array(this.H).fill(1)
-    };
     this.params = 0;
     for (var k in this.w) this.params += this.w[k].length;
+    // layers that take part in the policy decision, in order; `hidden` = ReLU + knock-out mask
+    this.layers = [];
+    var sp = this.spec, j;
+    for (j = 0; j < sp.trunk.length; j++) this.layers.push(withMeta(sp.trunk[j], true));
+    for (j = 0; j < sp.pi.length; j++) this.layers.push(withMeta(sp.pi[j], j < sp.pi.length - 1));
+    this.vlayers = [];
+    for (j = 0; j < sp.v.length; j++) this.vlayers.push(withMeta(sp.v[j], j < sp.v.length - 1));
+    this.masks = {};
+    for (j = 0; j < this.layers.length; j++) {
+      var L = this.layers[j];
+      if (L.hidden) this.masks[L.name] = new Float32Array(L.units).fill(1);
+    }
+    this.outLayer = this.layers[this.layers.length - 1];
+    this.A = this.outLayer.units;
   }
 
-  BrainNet.prototype.layerSizes = function () {
-    return { conv1: this.C[1], conv2: this.C[2], conv3: this.C[3], fc1: this.H, out: this.A };
-  };
+  function withMeta(L, hidden) {
+    var o = {};
+    for (var k in L) o[k] = L[k];
+    o.hidden = hidden;
+    o.units = L.kind === "conv" ? L.cout : L.out;             // knock-out granularity: conv channel / fc unit
+    o.size = L.kind === "conv" ? L.cout * L.hout * L.wout : L.out;
+    o.mapH = L.kind === "conv" ? L.hout : 1;
+    o.mapW = L.kind === "conv" ? L.wout : 1;
+    return o;
+  }
 
-  BrainNet.prototype.setKnock = function (layer, idx, off) { this.masks[layer][idx] = off ? 0 : 1; };
-  BrainNet.prototype.isKnocked = function (layer, idx) { return this.masks[layer][idx] === 0; };
+  BrainNet.prototype.hiddenLayers = function () { return this.layers.filter(function (L) { return L.hidden; }); };
+  BrainNet.prototype.layer = function (name) {
+    for (var i = 0; i < this.layers.length; i++) if (this.layers[i].name === name) return this.layers[i];
+    return null;
+  };
+  BrainNet.prototype.setKnock = function (layer, idx, off) { if (this.masks[layer]) this.masks[layer][idx] = off ? 0 : 1; };
+  BrainNet.prototype.isKnocked = function (layer, idx) { return !!this.masks[layer] && this.masks[layer][idx] === 0; };
   BrainNet.prototype.knockCount = function () {
     var c = 0;
     for (var k in this.masks) for (var i = 0; i < this.masks[k].length; i++) if (this.masks[k][i] === 0) c++;
@@ -62,51 +94,62 @@
   };
   BrainNet.prototype.restoreAll = function () { for (var k in this.masks) this.masks[k].fill(1); };
 
-  // 3x3 conv, padding 1, NxN. z = conv(x) + b; a = relu(z) * mask
-  BrainNet.prototype._conv = function (x, cin, w, b, cout, mask) {
-    var n = this.n, nn = n * n, z = new Float32Array(cout * nn), a = new Float32Array(cout * nn);
+  // ---- conv (kernel k, stride s, zero padding p). z = conv(x) + b ; a = relu(z) * mask (if hidden)
+  BrainNet.prototype._conv = function (L, x, mask) {
+    var cin = L.cin, cout = L.cout, k = L.k, s = L.s, p = L.p, hin = L.hin, win = L.win, ho = L.hout, wo = L.wout;
+    var w = this.w[L.name + ".weight"], b = this.w[L.name + ".bias"];
+    var hw = ho * wo, z = new Float32Array(cout * hw), a = new Float32Array(cout * hw);
+    var ihw = hin * win;
     for (var co = 0; co < cout; co++) {
-      var zo = co * nn, bias = b[co];
-      for (var p = 0; p < nn; p++) z[zo + p] = bias;
+      var zo = co * hw, bias = b[co];
+      for (var q = 0; q < hw; q++) z[zo + q] = bias;
       for (var ci = 0; ci < cin; ci++) {
-        var xo = ci * nn, wo = (co * cin + ci) * 9;
-        for (var ky = 0; ky < 3; ky++) {
-          for (var kx = 0; kx < 3; kx++) {
-            var wv = w[wo + ky * 3 + kx];
+        var xo = ci * ihw, wo0 = (co * cin + ci) * k * k;
+        for (var ky = 0; ky < k; ky++) {
+          for (var kx = 0; kx < k; kx++) {
+            var wv = w[wo0 + ky * k + kx];
             if (wv === 0) continue;
-            var dy = ky - 1, dx = kx - 1;
-            var y0 = dy < 0 ? 1 : 0, y1 = dy > 0 ? n - 1 : n;
-            var x0 = dx < 0 ? 1 : 0, x1 = dx > 0 ? n - 1 : n;
-            for (var y = y0; y < y1; y++) {
-              var zr = zo + y * n, xr = xo + (y + dy) * n + dx;
-              for (var xx = x0; xx < x1; xx++) z[zr + xx] += wv * x[xr + xx];
+            for (var oy = 0; oy < ho; oy++) {
+              var iy = oy * s + ky - p;
+              if (iy < 0 || iy >= hin) continue;
+              var zr = zo + oy * wo, xr = xo + iy * win;
+              for (var ox = 0; ox < wo; ox++) {
+                var ix = ox * s + kx - p;
+                if (ix < 0 || ix >= win) continue;
+                z[zr + ox] += wv * x[xr + ix];
+              }
             }
           }
         }
       }
-      var m = mask[co];
-      for (var q = 0; q < nn; q++) { var v = z[zo + q]; a[zo + q] = v > 0 ? v * m : 0; }
+      var m = mask ? mask[co] : 1;
+      if (L.hidden) for (q = 0; q < hw; q++) { var v = z[zo + q]; a[zo + q] = v > 0 ? v * m : 0; }
+      else for (q = 0; q < hw; q++) a[zo + q] = z[zo + q];
     }
     return { z: z, a: a };
   };
 
-  // gradient of conv input given gradient of conv pre-activation dz
-  BrainNet.prototype._convBack = function (dz, cin, w, cout) {
-    var n = this.n, nn = n * n, dx = new Float32Array(cin * nn);
+  // gradient of the conv input given dz (gradient of the pre-activation)
+  BrainNet.prototype._convBack = function (L, dz) {
+    var cin = L.cin, cout = L.cout, k = L.k, s = L.s, p = L.p, hin = L.hin, win = L.win, ho = L.hout, wo = L.wout;
+    var w = this.w[L.name + ".weight"], hw = ho * wo, ihw = hin * win, dx = new Float32Array(cin * ihw);
     for (var co = 0; co < cout; co++) {
-      var zo = co * nn;
+      var zo = co * hw;
       for (var ci = 0; ci < cin; ci++) {
-        var xo = ci * nn, wo = (co * cin + ci) * 9;
-        for (var ky = 0; ky < 3; ky++) {
-          for (var kx = 0; kx < 3; kx++) {
-            var wv = w[wo + ky * 3 + kx];
+        var xo = ci * ihw, wo0 = (co * cin + ci) * k * k;
+        for (var ky = 0; ky < k; ky++) {
+          for (var kx = 0; kx < k; kx++) {
+            var wv = w[wo0 + ky * k + kx];
             if (wv === 0) continue;
-            var dy = ky - 1, ddx = kx - 1;
-            var y0 = dy < 0 ? 1 : 0, y1 = dy > 0 ? n - 1 : n;
-            var x0 = ddx < 0 ? 1 : 0, x1 = ddx > 0 ? n - 1 : n;
-            for (var y = y0; y < y1; y++) {
-              var zr = zo + y * n, xr = xo + (y + dy) * n + ddx;
-              for (var xx = x0; xx < x1; xx++) dx[xr + xx] += wv * dz[zr + xx];
+            for (var oy = 0; oy < ho; oy++) {
+              var iy = oy * s + ky - p;
+              if (iy < 0 || iy >= hin) continue;
+              var zr = zo + oy * wo, xr = xo + iy * win;
+              for (var ox = 0; ox < wo; ox++) {
+                var ix = ox * s + kx - p;
+                if (ix < 0 || ix >= win) continue;
+                dx[xr + ix] += wv * dz[zr + ox];
+              }
             }
           }
         }
@@ -115,122 +158,132 @@
     return dx;
   };
 
-  /** Forward only (fast path for rollouts). Returns Float32Array(4) of Q values. */
-  BrainNet.prototype.q = function (x) {
-    return this.forward(x, null, false).q;
+  BrainNet.prototype._fc = function (L, x, mask) {
+    var W = this.w[L.name + ".weight"], b = this.w[L.name + ".bias"], D = L["in"], H = L.out;
+    var z = new Float32Array(H), a = new Float32Array(H);
+    for (var j = 0; j < H; j++) {
+      var sum = b[j], ro = j * D;
+      for (var i = 0; i < D; i++) sum += W[ro + i] * x[i];
+      z[j] = sum;
+      a[j] = L.hidden ? (sum > 0 ? sum * (mask ? mask[j] : 1) : 0) : sum;
+    }
+    return { z: z, a: a };
   };
 
-  /** Greedy action with the 180-degree turn masked (Q + log(mask)); ties -> lowest index. */
-  BrainNet.argmaxLegal = function (q, legal) {
+  BrainNet.prototype._fcBack = function (L, dz) {
+    var W = this.w[L.name + ".weight"], D = L["in"], H = L.out, dx = new Float32Array(D);
+    for (var j = 0; j < H; j++) {
+      var dv = dz[j];
+      if (dv === 0) continue;
+      var ro = j * D;
+      for (var i = 0; i < D; i++) dx[i] += W[ro + i] * dv;
+    }
+    return dx;
+  };
+
+  BrainNet.prototype._run = function (L, x) {
+    return L.kind === "conv" ? this._conv(L, x, this.masks[L.name]) : this._fc(L, x, this.masks[L.name]);
+  };
+
+  /** Greedy choice among allowed actions (mask > 0); ties -> lowest index. */
+  BrainNet.argmaxMasked = function (scores, mask) {
     var best = -1, bv = -Infinity;
-    for (var i = 0; i < q.length; i++) {
-      if (!legal[i]) continue;
-      if (q[i] > bv) { bv = q[i]; best = i; }
+    for (var i = 0; i < scores.length; i++) {
+      if (mask && !mask[i]) continue;
+      if (scores[i] > bv) { bv = scores[i]; best = i; }
     }
     return best;
   };
 
-  /**
-   * Full analysis of one state.
-   * legal: [1,1,0,1]-style mask; grad: also backpropagate dQ[action]/d(everything).
-   * Returns q, action, activations (a1,a2,a3,h), and if grad: dx (input gradient),
-   * ga1..ga3/gh (gradients w.r.t. activations), contrib.{conv1,conv2,conv3,fc1}
-   * (activation x gradient summed per unit = contribution to Q[action]) and fcOut
-   * (h_j * W2[o, j] for every output o — exact decomposition of the last layer).
-   */
-  BrainNet.prototype.forward = function (x, legal, grad) {
-    var n = this.n, nn = n * n, w = this.w, C = this.C, H = this.H, A = this.A;
-    var l1 = this._conv(x, C[0], w["conv1.weight"], w["conv1.bias"], C[1], this.masks.conv1);
-    var l2 = this._conv(l1.a, C[1], w["conv2.weight"], w["conv2.bias"], C[2], this.masks.conv2);
-    var l3 = this._conv(l2.a, C[2], w["conv3.weight"], w["conv3.bias"], C[3], this.masks.conv3);
-    var D = C[3] * nn, W1 = w["fc1.weight"], b1 = w["fc1.bias"], zh = new Float32Array(H), h = new Float32Array(H);
-    var a3 = l3.a, mh = this.masks.fc1;
-    for (var j = 0; j < H; j++) {
-      var s = b1[j], ro = j * D;
-      for (var i = 0; i < D; i++) s += W1[ro + i] * a3[i];
-      zh[j] = s;
-      h[j] = s > 0 ? s * mh[j] : 0;
-    }
-    var W2 = w["fc2.weight"], b2 = w["fc2.bias"], q = new Float32Array(A);
-    for (var o = 0; o < A; o++) {
-      var t = b2[o];
-      for (var jj = 0; jj < H; jj++) t += W2[o * H + jj] * h[jj];
-      q[o] = t;
-    }
-    var res = { q: q, a1: l1.a, a2: l2.a, a3: a3, h: h };
-    legal = legal || [1, 1, 1, 1];
-    res.legal = legal;
-    res.action = BrainNet.argmaxLegal(q, legal);
-    if (!grad) return res;
-
-    var act = res.action;
-    // FC layer: exact per-output contributions h_j * W2[o, j]
-    var fcOut = [];
-    for (o = 0; o < A; o++) {
-      var row = new Float32Array(H);
-      for (jj = 0; jj < H; jj++) row[jj] = h[jj] * W2[o * H + jj];
-      fcOut.push(row);
-    }
-    // dQ[act]/dh, then through ReLU and mask
-    var gh = new Float32Array(H), dzh = new Float32Array(H);
-    for (jj = 0; jj < H; jj++) {
-      gh[jj] = W2[act * H + jj];
-      dzh[jj] = zh[jj] > 0 ? gh[jj] * mh[jj] : 0;
-    }
-    var ga3 = new Float32Array(D);
-    for (j = 0; j < H; j++) {
-      var dv = dzh[j];
-      if (dv === 0) continue;
-      var r0 = j * D;
-      for (i = 0; i < D; i++) ga3[i] += W1[r0 + i] * dv;
-    }
-    var self = this;
-    function reluBack(ga, z, mask, ch) {
-      var dz = new Float32Array(ch * nn);
-      for (var c = 0; c < ch; c++) {
-        var m = mask[c];
-        if (m === 0) continue;
-        for (var p = 0; p < nn; p++) { var k = c * nn + p; dz[k] = z[k] > 0 ? ga[k] * m : 0; }
-      }
-      return dz;
-    }
-    var dz3 = reluBack(ga3, l3.z, this.masks.conv3, C[3]);
-    var ga2 = self._convBack(dz3, C[2], w["conv3.weight"], C[3]);
-    var dz2 = reluBack(ga2, l2.z, this.masks.conv2, C[2]);
-    var ga1 = self._convBack(dz2, C[1], w["conv2.weight"], C[2]);
-    var dz1 = reluBack(ga1, l1.z, this.masks.conv1, C[1]);
-    var dx = self._convBack(dz1, C[0], w["conv1.weight"], C[1]);
-
-    function chContrib(a, ga, ch) {
-      var out = new Float32Array(ch);
-      for (var c = 0; c < ch; c++) {
-        var s2 = 0;
-        for (var p = 0; p < nn; p++) s2 += a[c * nn + p] * ga[c * nn + p];
-        out[c] = s2;
-      }
-      return out;
-    }
-    var fcC = new Float32Array(H);
-    for (jj = 0; jj < H; jj++) fcC[jj] = h[jj] * gh[jj];
-    res.dx = dx;
-    res.ga1 = ga1; res.ga2 = ga2; res.ga3 = ga3; res.gh = gh;
-    res.contrib = { input: chContrib(x, dx, C[0]), conv1: chContrib(l1.a, ga1, C[1]),
-                    conv2: chContrib(l2.a, ga2, C[2]), conv3: chContrib(a3, ga3, C[3]), fc1: fcC };
-    res.fcOut = fcOut;
-    // saliency like server.py: |dQ/dx| summed over channels, per cell
-    var sal = new Float32Array(nn);
-    for (var c = 0; c < C[0]; c++) for (var p = 0; p < nn; p++) sal[p] += Math.abs(dx[c * nn + p]);
-    res.saliency = sal;
-    return res;
+  /** Softmax over allowed actions (temperature 1), disallowed -> 0. */
+  BrainNet.softmaxMasked = function (scores, mask) {
+    var m = -Infinity, i, out = new Array(scores.length), z = 0;
+    for (i = 0; i < scores.length; i++) { out[i] = 0; if ((!mask || mask[i]) && scores[i] > m) m = scores[i]; }
+    for (i = 0; i < scores.length; i++) if (!mask || mask[i]) { out[i] = Math.exp(scores[i] - m); z += out[i]; }
+    for (i = 0; i < scores.length; i++) out[i] = (!mask || mask[i]) ? out[i] / z : 0;
+    return out;
   };
 
-  /** Softmax over legal actions (temperature 1), illegal -> 0. Port of vote_core.softmax_legal. */
-  BrainNet.softmaxLegal = function (q, legal) {
-    var m = -Infinity, i, out = [0, 0, 0, 0], z = 0;
-    for (i = 0; i < 4; i++) if (legal[i] && q[i] > m) m = q[i];
-    for (i = 0; i < 4; i++) if (legal[i]) { out[i] = Math.exp(q[i] - m); z += out[i]; }
-    for (i = 0; i < 4; i++) out[i] = legal[i] ? out[i] / z : 0;
-    return out;
+  /** Sample an index from probabilities with a uniform u in [0,1) (cumulative sum, same as brains.py). */
+  BrainNet.sample = function (probs, u) {
+    var c = 0, last = probs.length - 1;
+    for (var i = 0; i < probs.length; i++) {
+      if (probs[i] <= 0) continue;
+      c += probs[i];
+      last = i;
+      if (u < c) return i;
+    }
+    return last;
+  };
+
+  /**
+   * Full analysis of one observation.
+   *   x     Float32Array input (c*h*w)
+   *   mask  4 numbers in BRAIN action order (1 = allowed)
+   *   grad  also backpropagate d scores[action] / d(everything)
+   * Returns { q (scores, Float32Array 4), value (number|null), action (brain index, greedy), probs,
+   *           acts: {layerName: {a, z}}, h (last hidden), a1 (first layer), and if grad:
+   *           dx, contrib: {input, <each hidden layer>}, saliency (per input pixel, |dx| summed over channels),
+   *           fcOut (per output o: h_j * W[o, j] for the last hidden layer) }.
+   */
+  BrainNet.prototype.forward = function (x, mask, grad) {
+    var layers = this.layers, acts = {}, cur = x, i, L;
+    for (i = 0; i < layers.length; i++) {
+      L = layers[i];
+      var r = this._run(L, cur);
+      acts[L.name] = r;
+      cur = r.a;
+    }
+    var scores = cur, value = null;
+    if (this.vlayers.length) {
+      var cv = this.spec.trunk.length ? acts[this.spec.trunk[this.spec.trunk.length - 1].name].a : x;
+      for (i = 0; i < this.vlayers.length; i++) cv = this._run(this.vlayers[i], cv).a;
+      value = cv[0];
+    }
+    mask = mask || [1, 1, 1, 1];
+    var action = BrainNet.argmaxMasked(scores, mask);
+    var lastHidden = layers.length >= 2 ? layers[layers.length - 2] : null;
+    var res = { q: scores, value: value, action: action, mask: mask, probs: BrainNet.softmaxMasked(scores, mask), acts: acts,
+                h: lastHidden ? acts[lastHidden.name].a : x, a1: acts[layers[0].name].a };
+    if (!grad) return res;
+
+    // ---- backward: d scores[action]
+    var contrib = {}, gUp = null;             // gUp = gradient w.r.t. the current layer's output activation
+    for (i = layers.length - 1; i >= 0; i--) {
+      L = layers[i];
+      var z = acts[L.name].z, dz;
+      if (i === layers.length - 1) {
+        dz = new Float32Array(z.length);
+        dz[action] = 1;
+      } else {
+        var m = this.masks[L.name], a = acts[L.name].a;
+        dz = new Float32Array(z.length);
+        var c = new Float32Array(L.units), per = L.size / L.units;
+        for (var k = 0; k < z.length; k++) {
+          var u = Math.floor(k / per);
+          dz[k] = z[k] > 0 ? gUp[k] * m[u] : 0;
+          c[u] += a[k] * gUp[k];
+        }
+        contrib[L.name] = c;
+      }
+      gUp = L.kind === "conv" ? this._convBack(L, dz) : this._fcBack(L, dz);
+    }
+    var cin = this.spec.input.c, hw = this.spec.input.h * this.spec.input.w, cI = new Float32Array(cin), sal = new Float32Array(hw);
+    for (var ch = 0; ch < cin; ch++) for (var q = 0; q < hw; q++) { cI[ch] += x[ch * hw + q] * gUp[ch * hw + q]; sal[q] += Math.abs(gUp[ch * hw + q]); }
+    contrib.input = cI;
+    res.dx = gUp;
+    res.contrib = contrib;
+    res.saliency = sal;
+    if (lastHidden) {
+      var W2 = this.w[this.outLayer.name + ".weight"], H = lastHidden.size, h = res.h, fcOut = [];
+      for (var o = 0; o < this.A; o++) {
+        var row = new Float32Array(H);
+        for (var jj = 0; jj < H; jj++) row[jj] = h[jj] * W2[o * H + jj];
+        fcOut.push(row);
+      }
+      res.fcOut = fcOut;
+    }
+    return res;
   };
 
   g.BrainNet = BrainNet;

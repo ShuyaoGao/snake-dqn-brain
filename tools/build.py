@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """One command to build the static page (play/) and the release zip.
 
-    python -m tools.build              # credits.js (+ model .js if PyTorch is installed)
+    python -m tools.build              # credits.js (+ the DQN model .js if PyTorch is installed; the PPO brains come from tools/export_sb3.py)
     python -m tools.build --eval       # also re-run the evaluation -> results/result.json
     python -m tools.build --release    # also write release/<repo>-v<version>.zip (play/ only)
 
@@ -80,6 +80,8 @@ def main(argv=None):
             from tools import export_model
             export_model.main()
     print("wrote", write_credits_js(credits).relative_to(ROOT))
+    if not (PLAY / "js" / "results.js").exists() or not (ROOT / "results" / "brains.json").exists():
+        raise SystemExit("results/brains.json or play/js/results.js missing: run `python -m tools.eval_brains` first")
     total = sum(p.stat().st_size for p in PLAY.rglob("*") if p.is_file())
     print(f"play/ = {total} bytes")
     if args.release:

@@ -1,7 +1,8 @@
-# 只有“想自己训练 / 评估 / 跑测试”才需要 Python；网页 play/ 不需要任何安装。
+# 只有“想自己评估 / 导出 / 训练 / 跑测试”才需要 Python；网页 play/ 不需要任何安装。
 numpy>=1.26
-# torch 用 CPU 版即可（本项目纯 CPU 训练/推理）。Linux: pip install torch --index-url https://download.pytorch.org/whl/cpu
-torch>=2.2
+# torch 只有训练 Double DQN（train.py）和导出它（tools/export_model.py）才需要；三个 PPO 大脑的导出（tools/export_sb3.py）、
+# 评估（tools/eval_brains.py）和全部一致性测试都只用 NumPy。CPU 版即可：pip install torch --index-url https://download.pytorch.org/whl/cpu
+# torch>=2.2
 # Intel Mac 上 PyTorch 最后一版是 2.2.2，它只认 numpy 1.x
 numpy<2; sys_platform == "darwin" and platform_machine == "x86_64"
 # 测试（浏览器端与 PyTorch 一致性测试另需 Node.js）

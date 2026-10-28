@@ -13,12 +13,15 @@ license: MIT
 repository-code: "https://github.com/{{GH_USER}}/{{REPO_NAME}}"
 url: "https://{{GH_USER}}.github.io/{{REPO_NAME}}/play/"
 abstract: >-
-  A browser-only teaching demo ({{SERIES_NAME_EN}}): a convolutional Double DQN agent plays
-  Snake on a 10x10 grid while a live "brain panel" shows the real activations, contributions and
-  Q values computed from the trained weights. Includes a you-vs-DQN mode, knock-out of neurons,
-  and the full PyTorch training code.
+  A browser-only teaching demo ({{SERIES_NAME_EN}}): four trained Snake policies (two 100M-step PPO
+  convolutional networks and an MLP from open-source projects, plus a small Double DQN trained here)
+  play while a live "brain panel" shows the real activations, contributions, action scores and state
+  value computed from the weights in plain JavaScript. Brains can be switched and compared on the same
+  fixed games; neurons can be knocked out. Includes a NumPy reference implementation, the export tool
+  for Stable-Baselines3 policies and the DQN training code.
 keywords:
   - course-demo
   - reinforcement-learning
   - deep-q-network
+  - proximal-policy-optimization
   - convolutional-neural-network

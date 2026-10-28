@@ -1,12 +1,13 @@
 /* 贪吃蛇 · 看懂 AI 的大脑 — page logic (plain script, works from file://).
- * Modes: 观战 (watch, default) / 我来玩 (play) / 练习 (practice).
- * Right column: brain panel computed live from the real weights (play/js/brain_net.js). */
+ * One mode: the AI plays, you watch its brain. Several brains can be switched (config.js `brains`);
+ * the right column is computed live from the real weights (play/js/brain_net.js). */
 (function () {
   "use strict";
-  var CFG = window.APP_CONFIG, CREDITS = window.CREDITS || {};
+  var CFG = window.APP_CONFIG, CREDITS = window.CREDITS || {}, RESULTS = window.BRAIN_RESULTS || {};
   var SnakeEnv = window.SnakeEnv, BrainNet = window.BrainNet;
   var $ = function (id) { return document.getElementById(id); };
   var params = new URLSearchParams(location.search);
+  var ACT = CFG.actions;
 
   function store(key, val) {
     try {
@@ -16,35 +17,26 @@
     return null;
   }
 
-  // ------------------------------------------------------------------ model
-  if (!window.SNAKE_MODEL) {
-    document.body.innerHTML = "<div class='ended'>模型文件 model/snake_cnn_fp16.js 没有加载成功。<br>请把整个 play 文件夹一起解压后再打开 index.html。</div>";
+  // ------------------------------------------------------------------ brains
+  function payloadOf(cfg) {
+    if (cfg.global) return window[cfg.global] || null;
+    return (window.SNAKE_BRAINS && window.SNAKE_BRAINS[cfg.id]) || null;
+  }
+  var BRAINS = CFG.brains.filter(payloadOf);
+  if (!BRAINS.length) {
+    document.body.innerHTML = "<div class='ended'>模型文件（play/model/*.js）没有加载成功。<br>请把整个 play 文件夹一起解压后再打开 index.html。</div>";
     return;
   }
-  var net = new BrainNet(window.SNAKE_MODEL);
-  var META = window.SNAKE_MODEL.meta;
-  var N = net.n, NN = N * N;
-  var SIZES = net.layerSizes();
-  var ACT = CFG.actions;
-  var OPP = SnakeEnv.OPPOSITE;
 
   // ------------------------------------------------------------------ app state
   var app = {
-    mode: "watch",
-    alive: true,
-    fog: true,
-    autoNext: true,
-    timers: [],
-    view: null,        // {snap, res, label, arrows, fog}
-    dirty: false,
-    sizes: {},
-    kConv: CFG.topK.conv,   // 每个卷积层展开的通道数（手机紧凑画法下更少）
-    touch: false,           // 触屏设备（粗指针）
-    touchp: false,          // 触屏 + 宽度 ≤ 980 + 竖屏 → 手机竖屏布局
-    touchl: false,          // 触屏 + 宽度 ≤ 980 + 横屏 → 提示竖屏
-    sheet: false,           // 「看大脑」全屏面板是否打开（手机「我来玩」）
-    touchCtl: null
+    brain: null, net: null, spec: null, N: 12, NN: 144, geo: null, inputs: [], lastHidden: null,
+    policy: "greedy", guard: false,
+    alive: true, fog: true, autoNext: true, timers: [], view: null, dirty: false, sizes: {},
+    kConv: CFG.topK.conv, touch: false, touchp: false
   };
+  var W = { env: null, rng: null, playing: true, speedIdx: CFG.watchDefault, ms: CFG.watchSpeeds[CFG.watchDefault].ms,
+            game: 0, results: {}, qCurve: [], over: null, lastRes: null, totalSteps: 0, timer: null, knockedThisGame: false };
 
   function later(fn, ms) {
     var id = setTimeout(function () {
@@ -58,42 +50,70 @@
 
   function toast(msg) {
     var t = $("toast");
-    t.textContent = msg;
-    t.classList.add("show");
-    clearTimeout(toast.h);
-    toast.h = setTimeout(function () { t.classList.remove("show"); }, 2200);
+    t.textContent = msg; t.classList.add("show");
+    cancel(t._timer); t._timer = later(function () { t.classList.remove("show"); }, 1400);
   }
 
-  function maxLegal(q, legal) {
+  function brainById(id) { for (var i = 0; i < BRAINS.length; i++) if (BRAINS[i].id === id) return BRAINS[i]; return null; }
+  function curResults() { return W.results[app.brain.id] || (W.results[app.brain.id] = []); }
+  function invMap() { var inv = [0, 0, 0, 0]; app.spec.actionMap.forEach(function (ea, i) { inv[ea] = i; }); return inv; }
+  function maskKind() { return app.guard ? "safe" : app.spec.mask; }
+  function valueOf(res) {
+    if (res.value !== null && res.value !== undefined) return res.value;
     var m = -Infinity;
-    for (var i = 0; i < 4; i++) if (legal[i] && q[i] > m) m = q[i];
+    for (var i = 0; i < res.q.length; i++) if (res.mask[i] && res.q[i] > m) m = res.q[i];
     return m;
   }
 
-  function envFromSnap(s) {
-    var e = new SnakeEnv(s.n, 0);
-    e.snake = s.snake.map(function (p) { return [p[0], p[1]]; });
-    e.food = s.food ? [s.food[0], s.food[1]] : null;
-    e.direction = s.dir;
-    e.score = s.score; e.steps = s.steps; e.done = false;
+  /** Switch brain: new network, new board size, new panel; the watch loop restarts on the same seed. */
+  function setBrain(id) {
+    var cfg = brainById(id) || BRAINS[0];
+    app.brain = cfg;
+    app.net = new BrainNet(payloadOf(cfg));
+    app.spec = app.net.spec;
+    app.N = app.spec.n; app.NN = app.N * app.N;
+    app.geo = SnakeEnv.obsGeometry(app.spec.obs, app.N);
+    app.inputs = CFG.inputs[app.spec.obs] || [];
+    var hid = app.net.hiddenLayers();
+    app.lastHidden = hid.length ? hid[hid.length - 1] : null;
+    app.policy = cfg.policy || "greedy";
+    app.guard = !!cfg.guard;
+    store("brain", cfg.id);
+    buildPanel();
+    renderFormula();
+    hideBanner();
+    watchRestart();
+    renderOpts(); renderControls(); renderExplain(); renderPills();
+    layout();
+    scheduleWatch();
+  }
+
+  /** Run the current brain on `env` (full = also gradients for the panel). */
+  function analyze(env, full) {
+    var em = env.maskOf(maskKind()), am = app.spec.actionMap, bm = am.map(function (ea) { return em[ea]; });
+    var res = app.net.forward(env.obs(app.spec.obs), bm, full !== false);
+    res.greedy = res.action;
+    if (app.policy === "sample") res.action = BrainNet.sample(res.probs, W.rng.random());
+    res.envAction = am[res.action];
+    res.envMask = em;
+    if (res.saliency) res.boardSal = SnakeEnv.toBoard(res.saliency, app.spec.obs, app.N);
+    return res;
+  }
+
+  function envFromSnap(snap) {
+    var e = new SnakeEnv(snap.n, 0);
+    e.snake = snap.snake.map(function (p) { return [p[0], p[1]]; });
+    e.food = snap.food ? [snap.food[0], snap.food[1]] : null;
+    e.direction = snap.dir; e.score = snap.score; e.steps = snap.steps; e.done = snap.done;
     return e;
   }
 
-  function analyze(env) {
-    return net.forward(env.state(), env.legalMask(), true);
-  }
-
-  // ================================================================== WATCH engine (also used by 练习)
-  var W = {
-    env: null, game: 0, results: [], playing: true, timer: null, speedIdx: CFG.watchDefault,
-    ms: CFG.watchSpeeds[CFG.watchDefault].ms, qCurve: [], over: null, knockedThisGame: false,
-    lastRes: null, totalSteps: 0
-  };
-
+  // ================================================================== WATCH loop
   function watchRestart() {
-    W.env = new SnakeEnv(N, CFG.watchSeed);
+    W.env = new SnakeEnv(app.N, CFG.watchSeed);
+    W.rng = new window.PyRandom(CFG.watchSeed);
     W.game = 0;
-    W.results = [];
+    W.results[app.brain.id] = [];
     watchNextGame();
   }
 
@@ -102,24 +122,26 @@
     W.game += 1;
     W.qCurve = [];
     W.over = null;
-    W.knockedThisGame = net.knockCount() > 0;
-    watchAnalyze();
+    W.knockedThisGame = app.net.knockCount() > 0;
+    watchAnalyze(true);
   }
 
-  function watchAnalyze() {
-    W.lastRes = analyze(W.env);
-    W.qCurve.push(maxLegal(W.lastRes.q, W.lastRes.legal));
+  function watchAnalyze(full) {
+    W.lastRes = analyze(W.env, full);
+    W.qCurve.push(valueOf(W.lastRes));
     if (W.qCurve.length > 600) W.qCurve.shift();
-    if (app.mode !== "play") setWatchView();
+    setWatchView();
   }
 
   function setWatchView() {
-    var res = W.lastRes;
+    var res = W.lastRes, a = res.envAction, extra = "";
+    if (app.policy === "sample" && res.action !== res.greedy) extra = "（按概率抽到的；最大概率是 " + ACT[app.spec.actionMap[res.greedy]].arrow + "）";
+    if (a === SnakeEnv.OPPOSITE[W.env.direction]) extra = "（掉头无效，按直行）";
     app.view = {
       snap: W.env.snap(), res: res, curve: W.qCurve,
-      label: W.over ? "<b>本局结束</b>：显示的是撞上之前那一步的局面" : "<b>此刻局面</b> → 打算往 <b>" + ACT[res.action].arrow + " " + ACT[res.action].name + "</b>",
-      arrows: W.over ? [] : [{ from: W.env.snake[0], dir: res.action, color: CFG.colors.chosen, dashed: false }],
-      fog: app.fog ? res.saliency : null
+      label: W.over ? "<b>本局结束</b>：显示的是撞上之前那一步的局面" : "<b>此刻局面</b> → 打算往 <b>" + ACT[a].arrow + " " + ACT[a].name + "</b>" + extra,
+      arrows: W.over ? [] : [{ from: W.env.snake[0], dir: a, color: CFG.colors.chosen, dashed: false }],
+      fog: app.fog && res.boardSal ? res.boardSal : null
     };
     if (W.over) app.view.snap = W.over.snapBefore;
     markDirty();
@@ -127,32 +149,34 @@
 
   function watchStep() {
     if (W.over) return;
-    var env = W.env, a = W.lastRes.action;
+    var env = W.env, a = W.lastRes.envAction;
     var before = env.snap();
     var peeked = env.peek(a);
     var r = env.step(a);
     W.totalSteps++;
-    if (net.knockCount() > 0) W.knockedThisGame = true;
+    if (app.net.knockCount() > 0) W.knockedThisGame = true;
     if (r.done) {
-      var reason = SnakeEnv.endReason(r.info, peeked, N);
+      var reason = SnakeEnv.endReason(r.info, peeked, app.N);
       W.over = { reason: reason, score: env.score, steps: env.steps, snapBefore: before };
-      W.results.push({ score: env.score, steps: env.steps, reason: reason, knocked: W.knockedThisGame });
+      curResults().push({ score: env.score, steps: env.steps, length: env.snake.length, reason: reason, knocked: W.knockedThisGame,
+                          guard: app.guard, policy: app.policy });
+      if (!W.lastRes.contrib) { var e2 = envFromSnap(before); W.lastRes = analyze(e2, true); }
       setWatchView();
       showWatchBanner();
-      practiceEvent("watch-over");
+      renderExplain();
       if (app.autoNext && W.playing) {
-        later(function () { if (W.over && app.mode !== "play") { hideBanner(); watchNextGame(); scheduleWatch(); } },
-              Math.min(1300, Math.max(250, W.ms * 4)));
+        later(function () { if (W.over) { hideBanner(); watchNextGame(); scheduleWatch(); } }, Math.min(1300, Math.max(250, W.ms * 4)));
       }
       return;
     }
-    watchAnalyze();
+    // 极速档：梯度只每 4 步算一次（右边面板隔几步刷新），其余步只做前向
+    watchAnalyze(W.ms > 20 || W.totalSteps % 4 === 0);
   }
 
   function scheduleWatch() {
     cancel(W.timer);
     W.timer = null;
-    if (!W.playing || app.mode === "play" || !app.alive) return;
+    if (!W.playing || !app.alive) return;
     W.timer = later(function () {
       W.timer = null;
       if (W.over) return;
@@ -168,6 +192,12 @@
     renderControls();
   }
 
+  function manualStep() {
+    if (W.playing) setWatchPlaying(false);
+    if (W.over) { hideBanner(); watchNextGame(); }
+    else watchStep();
+  }
+
   function showWatchBanner() {
     var o = W.over, b = $("banner");
     b.innerHTML = "<div class='big'>本局结束：" + o.reason + "</div><div>吃到 " + o.score + " 个食物，走了 " + o.steps + " 步</div>" +
@@ -176,241 +206,16 @@
   }
   function hideBanner() { $("banner").hidden = true; }
 
-  // ================================================================== PLAY engine (我来玩)
-  var P = {
-    episode: 0, env: null, seed: 0, levelIdx: CFG.playDefault, ms: CFG.playLevels[CFG.playDefault].ms,
-    assist: false, started: false, paused: false, pending: null, timer: null, log: [], history: [],
-    cur: null, prev: null, prevSnap: null, over: null, dqn: null, replay: null, qCurve: []
-  };
-
-  function playNewGame() {
-    cancel(P.timer);
-    P.episode += 1;
-    P.seed = CFG.playSeed0 + P.episode;
-    P.env = new SnakeEnv(N, P.seed);
-    P.env.reset();
-    P.log = []; P.started = false; P.paused = false; P.pending = null; P.over = null;
-    P.prev = null; P.prevSnap = null; P.replay = null; P.qCurve = [];
-    P.dqn = dqnRollout(P.seed);
-    P.assistUsed = P.assist;
-    P.knocked = net.knockCount() > 0;
-    P.cur = analyze(P.env);
-    P.qCurve.push(maxLegal(P.cur.q, P.cur.legal));
-    hideBanner();
-    setPlayView();
-    renderExplain();
-  }
-
-  /** The DQN plays the same seed on its own (greedy), like the classroom version. */
-  function dqnRollout(seed) {
-    var env = new SnakeEnv(N, seed), info = {}, peeked = "";
-    env.reset();
-    while (!env.done && env.steps < 5000) {
-      var r = net.forward(env.state(), env.legalMask(), false);
-      peeked = env.peek(r.action);
-      info = env.step(r.action).info;
-    }
-    return { score: env.score, steps: env.steps, reason: env.done ? SnakeEnv.endReason(info, peeked, N) : "达到步数上限" };
-  }
-
-  function playKey(dir) {
-    if (app.mode !== "play" || P.over) return;
-    if (P.replay) { P.replay = null; setPlayView(); renderExplain(); }
-    if (P.ms === 0) { playStep(dir); return; }
-    P.pending = dir;
-    if (!P.started || P.paused) { P.started = true; P.paused = false; schedulePlay(); renderControls(); }
-  }
-
-  function schedulePlay() {
-    cancel(P.timer);
-    P.timer = null;
-    if (app.mode !== "play" || P.ms === 0 || !P.started || P.paused || P.over || P.replay) return;
-    P.timer = later(function () {
-      P.timer = null;
-      var d = P.pending === null ? P.env.direction : P.pending;
-      P.pending = null;
-      playStep(d);
-      schedulePlay();
-    }, P.ms);
-  }
-
-  function playStep(dir) {
-    if (P.over) return;
-    P.started = true;
-    $("board-hint").hidden = true;
-    var env = P.env, res = P.cur;
-    var you = dir === OPP[env.direction] ? env.direction : dir;   // 180-degree turn = keep going (same rule as training)
-    var rec = {
-      step: env.steps + 1, you: you, dqn: res.action, agree: you === res.action,
-      outcome: env.peek(you), dqnOutcome: env.peek(res.action), snap: env.snap(),
-      q: Array.from(res.q), legal: res.legal.slice()
-    };
-    var r = env.step(you);
-    P.log.push(rec);
-    P.prev = res; P.prevSnap = rec.snap;
-    if (P.assist) P.assistUsed = true;
-    if (net.knockCount() > 0) P.knocked = true;
-    if (r.done) {
-      playFinish(SnakeEnv.endReason(r.info, rec.outcome, N), rec);
-      return;
-    }
-    P.cur = analyze(env);
-    P.qCurve.push(maxLegal(P.cur.q, P.cur.legal));
-    setPlayView();
-    renderPills();
-  }
-
-  function playFinish(reason, fatal) {
-    cancel(P.timer);
-    var env = P.env, agree = 0;
-    P.log.forEach(function (r) { if (r.agree) agree++; });
-    P.over = {
-      ep: P.episode, seed: P.seed, you: { score: env.score, steps: env.steps, reason: reason },
-      dqn: P.dqn, agree: P.log.length ? agree / P.log.length : null, disagree: P.log.length - agree,
-      fatal: fatal, assist: P.assistUsed, knocked: P.knocked
-    };
-    P.history.push(P.over);
-    var f = fatal, b = $("banner");
-    b.innerHTML = "<div class='big'>本局结束：" + reason + "</div>" +
-      "<div>你：吃到 <b>" + env.score + "</b> 个，走了 " + env.steps + " 步</div>" +
-      "<div>致命一步：你走了 <span class='hl-you'>" + ACT[f.you].arrow + " " + ACT[f.you].name + "</span>，" +
-      "DQN 会走 <span class='hl-dqn'>" + ACT[f.dqn].arrow + " " + ACT[f.dqn].name + "</span> → " + f.dqnOutcome + "</div>" +
-      "<div>同一开局 DQN 自己玩：吃到 <b>" + P.dqn.score + "</b> 个，" + P.dqn.steps + " 步（" + P.dqn.reason + "）</div>" +
-      (app.touchp ? "<div style='color:#aab'>点「下一局」继续（横屏或电脑上可以回放你和 DQN 意见不同的时刻）</div>"
-                  : "<div style='color:#aab'>按 Enter 或「下一局」继续；左下角可以回放你和 DQN 意见不同的时刻</div>");
-    b.hidden = false;
-    setPlayView();
-    renderPills();
-    renderExplain();
-    renderControls();
-    practiceEvent("play-over");
-  }
-
-  function setPlayView() {
-    if (app.mode !== "play") return;
-    var v;
-    if (P.replay) {
-      var rec = P.replay, e = envFromSnap(rec.snap), res = net.forward(e.state(), e.legalMask(), true);
-      v = { snap: rec.snap, res: res, curve: P.qCurve,
-            label: "<b>回放第 " + rec.step + " 步</b>：你走 " + ACT[rec.you].arrow + "，DQN 会走 " + ACT[rec.dqn].arrow + "（结果：你 → " + rec.outcome + "；DQN → " + rec.dqnOutcome + "）",
-            arrows: [{ from: rec.snap.snake[0], dir: rec.you, color: CFG.colors.you, dashed: false },
-                     { from: rec.snap.snake[0], dir: rec.dqn, color: CFG.colors.dqn, dashed: true }],
-            fog: app.fog ? res.saliency : null };
-    } else if (P.assist && !P.over) {
-      v = { snap: P.env.snap(), res: P.cur, curve: P.qCurve,
-            label: "<b>此刻局面（辅助已开）</b>：DQN 建议往 <b>" + ACT[P.cur.action].arrow + " " + ACT[P.cur.action].name + "</b>",
-            arrows: [{ from: P.env.snake[0], dir: P.cur.action, color: CFG.colors.dqn, dashed: true }],
-            fog: app.fog ? P.cur.saliency : null };
-    } else if (P.prev) {
-      var last = P.log[P.log.length - 1];
-      v = { snap: P.over ? P.prevSnap : P.env.snap(), res: P.prev, curve: P.qCurve, inputSnap: P.prevSnap,
-            label: "<b>揭晓上一步</b>：那个局面里 DQN 会走 <b>" + ACT[last.dqn].arrow + "</b>，你走了 <b>" + ACT[last.you].arrow + "</b>" + (last.agree ? "（一致 ✓）" : "（不一致）"),
-            arrows: [{ from: P.prevSnap.snake[0], dir: last.you, color: CFG.colors.you, dashed: false },
-                     { from: P.prevSnap.snake[0], dir: last.dqn, color: CFG.colors.dqn, dashed: true }],
-            fog: null };
-    } else {
-      v = { snap: P.env.snap(), res: P.cur, curve: P.qCurve, cover: true,
-            label: "<b>等你走第一步</b>", arrows: [], fog: null };
-    }
-    app.view = v;
-    var hint = $("board-hint");
-    if (!P.started && !P.over && !P.replay) {
-      if (app.touchp) hint.textContent = P.ms === 0 ? "拖下方摇杆（或在棋盘上滑动）走第一步" : "拖摇杆开始（不动就一直直走）";
-      else hint.textContent = P.ms === 0 ? "按方向键（或 WASD / 在棋盘上滑动）走第一步" : "按任意方向键开始（不按键就一直直走）";
-      hint.hidden = false;
-    } else hint.hidden = true;
-    markDirty();
-  }
-
-  // ================================================================== PRACTICE (task list)
-  var TASKS = [
-    { id: "step3", text: "按 3 次「单步」（或 → 键）。每一步都对照右下角：<b>Q 值最高的绿色方向</b>就是蛇下一步走的方向。", anim: "step" },
-    { id: "slowfog", text: "选「慢放讲解」档并打开「注意力红雾」，看红雾怎么跟着蛇头和食物移动。", anim: "fog" },
-    { id: "knockconv", text: "在任意一个卷积层右侧的方阵里点一下，<b>敲掉</b>一个通道。", anim: "click" },
-    { id: "knockfc", text: "在全连接层敲掉<b>贡献最大的那个神经元</b>（圆点列表最上面那个），看 4 个 Q 值怎么变。", anim: "click" },
-    { id: "restore", text: "点右上角「全部恢复」，让大脑恢复原样。", anim: "click" },
-    { id: "playover", text: "切到「我来玩」，用回合制走完一局，看看你和 DQN 谁吃得多。", anim: "keys" },
-    { id: "replay", text: "一局结束后，在左下角点开一个「你 ≠ DQN」的时刻回放，想想 DQN 为什么那样走。", anim: "click" }
-  ];
-  var PR = { done: {}, stepCount: 0 };
-  (function loadTasks() {
-    var s = store("tasks");
-    if (s) { try { PR.done = JSON.parse(s) || {}; } catch (e) { PR.done = {}; } }
-  })();
-
-  function practiceEvent(ev, data) {
-    var before = Object.keys(PR.done).length;
-    if (ev === "manual-step") { PR.stepCount++; if (PR.stepCount >= 3) PR.done.step3 = 1; }
-    if ((ev === "speed" || ev === "fog") && W.speedIdx === 0 && app.fog) PR.done.slowfog = 1;
-    if (ev === "knock" && data && /^conv/.test(data.layer) && data.off) PR.done.knockconv = 1;
-    if (ev === "knock" && data && data.layer === "fc1" && data.off && data.top1) PR.done.knockfc = 1;
-    if (ev === "restore" && (PR.done.knockconv || PR.done.knockfc)) PR.done.restore = 1;
-    if (ev === "play-over" && P.ms === 0) PR.done.playover = 1;
-    if (ev === "replay") PR.done.replay = 1;
-    if (Object.keys(PR.done).length !== before) {
-      store("tasks", JSON.stringify(PR.done));
-      if (app.mode === "practice") renderExplain();
-      toast("练习任务完成 ✓");
-    }
-  }
-
-  // ================================================================== MODES
-  function setMode(m) {
-    if (!/^(watch|play|practice)$/.test(m)) return;
-    var prev = app.mode;
-    app.mode = m;
-    document.querySelectorAll(".tab").forEach(function (t) { t.classList.toggle("on", t.dataset.mode === m); });
-    ["watch", "play", "practice"].forEach(function (k) { document.body.classList.toggle("m-" + k, k === m); });
-    document.documentElement.classList.toggle("touchp-play", app.touchp && m === "play");
-    if (m !== "play") setSheet(false);
-    hideBanner();
-    $("board-hint").hidden = true;
-    if (m === "play") {
-      cancel(W.timer); W.timer = null;
-      if (!P.env) playNewGame();
-      else { if (P.over) showPlayBannerAgain(); setPlayView(); }
-    } else {
-      cancel(P.timer); P.timer = null;
-      if (P.started && !P.over && P.ms > 0) P.paused = true;
-      if (m === "practice" && prev !== "practice") W.playing = false;
-      if (m === "watch" && prev === "practice") W.playing = true;
-      if (W.over) showWatchBanner();
-      setWatchView();
-      scheduleWatch();
-    }
-    renderOpts(); renderControls(); renderExplain(); renderPills();
-    layout();
-  }
-
-  function showPlayBannerAgain() { if (P.over) { $("banner").hidden = false; } }
-
   // ================================================================== LEFT: pills / options / controls / explain
   function renderPills() {
-    var h = [];
-    if (app.mode === "play") {
-      var env = P.env, agree = 0;
-      P.log.forEach(function (r) { if (r.agree) agree++; });
-      h.push("<span class='pill'>第 <b>" + P.episode + "</b> 局</span>");
-      h.push("<span class='pill'>得分 <b>" + env.score + "</b></span>");
-      h.push("<span class='pill'>长度 <b>" + env.snake.length + "</b></span>");
-      h.push("<span class='pill'>步数 <b>" + env.steps + "</b></span>");
-      h.push("<span class='pill'>与 DQN 一致 <b>" + (P.log.length ? Math.round(100 * agree / P.log.length) + "%" : "–") + "</b></span>");
-    } else {
-      var e = W.env, done = W.results.length, sum = 0;
-      W.results.forEach(function (r) { sum += r.score; });
-      h.push("<span class='pill'>第 <b>" + W.game + "</b> 局</span>");
-      h.push("<span class='pill'>得分 <b>" + e.score + "</b></span>");
-      h.push("<span class='pill'>长度 <b>" + e.snake.length + "</b></span>");
-      h.push("<span class='pill'>步数 <b>" + e.steps + "</b></span>");
-      h.push("<span class='pill'>已看完 <b>" + done + "</b> 局，平均 <b>" + (done ? (sum / done).toFixed(2) : "–") + "</b> 分</span>");
-    }
+    var e = W.env, done = curResults(), sum = 0, h = [];
+    done.forEach(function (r) { sum += r.score; });
+    h.push("<span class='pill'>第 <b>" + W.game + "</b> 局</span>");
+    h.push("<span class='pill'>得分 <b>" + e.score + "</b></span>");
+    h.push("<span class='pill'>长度 <b>" + e.snake.length + "</b></span>");
+    h.push("<span class='pill'>步数 <b>" + e.steps + "</b></span>");
+    h.push("<span class='pill'>已看完 <b>" + done.length + "</b> 局，平均 <b>" + (done.length ? (sum / done.length).toFixed(2) : "–") + "</b> 分</span>");
     $("pills").innerHTML = h.join("");
-    // 手机「我来玩」一屏布局：胶囊行高度变了（例如多出一行）就重新算棋盘大小，保证操作区不被挤出视口
-    if (app.touchp && app.mode === "play" && app.alive) {
-      var ph = $("pills").offsetHeight;
-      if (app._pillsH !== undefined && ph !== app._pillsH) { app._pillsH = ph; layoutMobile(); return; }
-      app._pillsH = ph;
-    }
   }
 
   function presetButtons(list, idx, kind) {
@@ -420,114 +225,55 @@
   }
 
   function renderOpts() {
-    var o = $("opts"), h;
-    if (app.mode === "play") {
-      h = "<div class='opt-row'><span class='lab'>难度</span>" + presetButtons(CFG.playLevels, P.levelIdx, "level") +
-        "<input type='range' id='rng-ms' min='80' max='800' step='10' value='" + (P.ms || 260) + "'" + (P.ms === 0 ? " disabled" : "") + " data-tip='细调每步间隔（回合制下不用）'>" +
-        "<span class='ms' id='ms-lab'>" + (P.ms === 0 ? "等你按键" : P.ms + " 毫秒/步") + "</span></div>" +
-        "<div class='opt-row'><label class='ck' data-tip='辅助只是把 DQN 在“同一局面”的建议提前给你看：不改规则、不改食物位置，也不替你走。开过辅助的局在历局表里会标出来，所以比分仍然公平可比。'><input type='checkbox' id='ck-assist'" + (P.assist ? " checked" : "") + "> 辅助：提前显示 DQN 的建议</label>" +
-        "<label class='ck' data-tip='红雾 = 网络做这次决定时最“在意”的格子（|∂Q/∂输入|），只在辅助打开或回放时显示' data-anim='fog'><input type='checkbox' id='ck-fog'" + (app.fog ? " checked" : "") + "> 注意力红雾</label></div>";
-    } else {
-      h = "<div class='opt-row'><span class='lab'>速度</span>" + presetButtons(CFG.watchSpeeds, W.speedIdx, "speed") +
-        "<input type='range' id='rng-ms' min='5' max='1000' step='5' value='" + W.ms + "' data-tip='细调每步间隔'>" +
-        "<span class='ms' id='ms-lab'>" + W.ms + " 毫秒/步</span></div>" +
-        "<div class='opt-row'><label class='ck' data-tip='红雾 = 网络做这次决定时最“在意”的格子：|∂Q(所选方向)/∂输入|，颜色越深影响越大' data-anim='fog'><input type='checkbox' id='ck-fog'" + (app.fog ? " checked" : "") + "> 注意力红雾</label>" +
-        "<label class='ck'><input type='checkbox' id='ck-auto'" + (app.autoNext ? " checked" : "") + "> 死了自动开下一局</label></div>";
-    }
+    var o = $("opts"), b = app.brain, trainedSafe = app.spec.mask === "safe";
+    var h = "<div class='opt-row'><span class='lab'>大脑</span>" +
+      BRAINS.map(function (c) {
+        return "<button class='preset" + (c.id === b.id ? " on" : "") + "' data-kind='brain' data-id='" + c.id + "' data-tip='" + c.title + "（快捷键 " + c.key + "）：" + c.trained + "'>" + c.name + "</button>";
+      }).join("") + "</div>" +
+      "<div class='src'>来源：" + (b.url ? "<a href='" + b.url + "' target='_blank' rel='noopener'>" + b.source + "</a>" : b.source) + "（" + b.license + "）· " + b.algo + " · " + b.trained +
+      " · 棋盘 " + app.N + "×" + app.N + " · 参数 " + app.net.params.toLocaleString("en-US") + " 个</div>" +
+      "<div class='opt-row'><span class='lab'>速度</span>" + presetButtons(CFG.watchSpeeds, W.speedIdx, "speed") +
+      "<input type='range' id='rng-ms' min='5' max='1000' step='5' value='" + W.ms + "' data-tip='细调每步间隔'>" +
+      "<span class='ms' id='ms-lab'>" + W.ms + " 毫秒/步</span></div>" +
+      "<div class='opt-row'>" +
+      "<label class='ck' data-tip='红雾 = 网络做这次决定时最“在意”的格子：|∂(所选方向的分)/∂输入|，按格子汇总，颜色越深影响越大' data-anim='fog'><input type='checkbox' id='ck-fog'" + (app.fog ? " checked" : "") + "> 注意力红雾</label>" +
+      "<label class='ck'><input type='checkbox' id='ck-auto'" + (app.autoNext ? " checked" : "") + "> 死了自动开下一局</label>" +
+      (trainedSafe
+        ? "<label class='ck' data-tip='这个模型训练时就带“不能撞死、不能掉头”的动作掩码，是它的一部分，不能关'><input type='checkbox' checked disabled> 护栏（训练自带）</label>"
+        : "<label class='ck' data-tip='护栏 = 只在不会立刻撞墙、撞身的方向里选。这是我们加在模型外面的规则，不是模型学会的；关掉就是原模型本来的样子'><input type='checkbox' id='ck-guard'" + (app.guard ? " checked" : "") + "> 护栏（不撞死）</label>") +
+      "<span class='lab' style='min-width:0'>选动作</span>" +
+      "<button class='preset" + (app.policy === "greedy" ? " on" : "") + "' data-kind='policy' data-v='greedy' data-tip='每一步都走分最高的方向（确定性，同一种子每次一样）'>最大分</button>" +
+      "<button class='preset" + (app.policy === "sample" ? " on" : "") + "' data-kind='policy' data-v='sample' data-tip='按概率抽签决定方向（PPO 训练时就是这么走的；用固定种子的随机数，可复现）'>按概率抽样</button>" +
+      "</div>";
     o.innerHTML = h;
     bindTips(o);
-    renderMobileBar();
-  }
-
-  /** 手机「我来玩」操作区顶部一行：难度档位 + 看大脑 / 辅助 / 重开。 */
-  function renderMobileBar() {
-    $("mob-levels").innerHTML = presetButtons(CFG.playLevels, P.levelIdx, "level");
-    $("tk-assist").classList.toggle("on", !!P.assist);
-    $("tk-assist").setAttribute("aria-pressed", P.assist ? "true" : "false");
-    $("b-mnext").textContent = P.over ? "下一局" : "重开";
-  }
-
-  /** 右下角大圆键的含义随状态变化：开始 / 暂停 / 继续 / 下一局；回合制下是「直走一步」。 */
-  function renderTouchKey() {
-    var b = $("tk-pause"), hint = $("tk-hint"), label, tip, go = false;
-    if (P.over) { label = "下一局"; tip = "本局结束，再来一局"; go = true; }
-    else if (P.ms === 0) { label = "直走"; tip = "回合制：拖一次摇杆走一步，这个键让蛇直走一步"; }
-    else if (!P.started) { label = "开始"; tip = "开始后蛇会自动前进，拖摇杆改方向"; go = true; }
-    else if (P.paused) { label = "继续"; tip = "已暂停"; go = true; }
-    else { label = "暂停"; tip = "蛇正在自动前进"; }
-    b.textContent = label; b.classList.toggle("go", go); hint.textContent = tip;
-  }
-
-  function onTouchPress(key) {
-    if (app.mode !== "play" || key !== "pause") return;
-    if (P.over) { playNewGame(); renderControls(); renderPills(); return; }
-    if (P.ms === 0) { playKey(P.env.direction); return; }
-    if (!P.started) { P.started = true; P.paused = false; schedulePlay(); renderControls(); $("board-hint").hidden = true; return; }
-    P.paused = !P.paused; schedulePlay(); renderControls();
-  }
-
-  function setSheet(on) {
-    app.sheet = !!on;
-    document.body.classList.toggle("sheet-brain", app.sheet);
-    if (app.sheet) layout();
   }
 
   function renderControls() {
-    var c = $("controls"), h;
-    if (app.mode === "play") {
-      var timed = P.ms > 0;
-      h = "<button class='btn go' id='b-next' data-tip='开新的一局（种子 = " + (CFG.playSeed0) + " + 局号；DQN 用同一个开局）'>" + (P.over ? "下一局（Enter）" : "重开一局") + "</button>" +
-        (timed ? "<button class='btn' id='b-pause'" + (P.over || !P.started ? " disabled" : "") + ">" + (P.paused ? "▶ 继续" : "⏸ 暂停") + "</button>" : "") +
-        "<span style='color:var(--muted);font-size:12px'>方向键 / WASD；手机在棋盘上滑动</span>";
-    } else {
-      h = "<button class='btn " + (W.playing ? "" : "go") + "' id='b-play' data-tip='播放 / 暂停（空格）'>" + (W.playing ? "⏸ 暂停" : "▶ 播放") + "</button>" +
-        "<button class='btn' id='b-step' data-tip='暂停并只走一步（→ 或 . 键），方便对照右边的大脑' data-anim='step'>单步</button>" +
-        "<button class='btn' id='b-reset' data-tip='从头再来：回到和评估脚本一样的第 1 局（种子 999）'>重开</button>";
-    }
-    c.innerHTML = h;
+    var c = $("controls");
+    c.innerHTML = "<button class='btn " + (W.playing ? "" : "go") + "' id='b-play' data-tip='播放 / 暂停（空格）'>" + (W.playing ? "⏸ 暂停" : "▶ 播放") + "</button>" +
+      "<button class='btn' id='b-step' data-tip='暂停并只走一步（→ 或 . 键），方便对照右边的大脑' data-anim='step'>单步</button>" +
+      "<button class='btn' id='b-reset' data-tip='从头再来：回到和评估脚本一样的第 1 局（种子 " + CFG.watchSeed + "）'>重开</button>";
     bindTips(c);
-    renderTouchKey();
-    $("b-mnext").textContent = P.over ? "下一局" : "重开";
   }
 
+  function fmtNum(v, d) { return (v === null || v === undefined || isNaN(v)) ? "–" : (+v).toFixed(d === undefined ? 1 : d); }
+
   function renderExplain() {
-    var e = $("explain"), h = "";
-    if (app.mode === "watch") {
-      var ev = META.eval;
-      h = "<p><b>你在看什么：</b>蛇由一个卷积神经网络控制（DQN，深度 Q 网络）。它每一步给上下左右 4 个方向各打一个分——<b>Q 值</b>，意思是“往这边走，以后（打折后）大概还能拿到多少奖励”，然后选分最高的方向。</p>" +
-        "<p><b>右边是它的大脑：</b>从输入（它“看到”的 5 张 10×10 图）到 3 个卷积层、1 个全连接层，再到 4 个 Q 值，全部是真实权重在你的浏览器里实时算出来的。点任何方块或圆点可以把它敲掉。</p>" +
-        (ev ? "<p style='color:var(--muted)'>开局顺序和训练脚本的评估一样（种子 " + ev.seed + "）：不敲掉任何神经元时，前 " + ev.games + " 局平均吃到 " + ev.avg_score_fp16 + " 个（见 results/result.json）。</p>" : "");
-    } else if (app.mode === "practice") {
-      var n = 0;
-      TASKS.forEach(function (t) { if (PR.done[t.id]) n++; });
-      var cur = TASKS.filter(function (t) { return !PR.done[t.id]; })[0];
-      h = "<h3>练习：跟着清单看懂这个网络（已完成 " + n + " / " + TASKS.length + "）</h3><div class='progress'><i style='width:" + (100 * n / TASKS.length) + "%'></i></div><ul class='tasks'>" +
-        TASKS.map(function (t, i) {
-          var d = !!PR.done[t.id];
-          return "<li class='" + (d ? "done" : (cur === t ? "cur" : "")) + "' data-tip='" + t.text.replace(/<[^>]+>/g, "") + "' data-anim='" + t.anim + "'><span class='box'>" + (d ? "✓" : "") + "</span><span>" + (i + 1) + ". " + t.text + "</span></li>";
-        }).join("") + "</ul>" +
-        (n === TASKS.length ? "<p style='color:var(--green);margin-top:6px'><b>全部完成！</b>你已经会读这个网络的“大脑”了。</p>" : "") +
-        "<p style='margin-top:4px'><button class='mini-btn' id='b-tasks-reset'>清空进度重来</button></p>";
-    } else {
-      h = "<p><b>怎么玩：</b>和 DQN 玩<b>同一局</b>（同样的起点和食物）。你每走一步，就揭晓 DQN 在<b>同一局面</b>会怎么走：<span class='hl-you'>黄色实线</span> = 你，<span class='hl-dqn'>蓝色虚线</span> = DQN。右边的大脑显示它在那个局面的想法。</p>";
-      if (P.history.length) {
-        h += "<table class='hist'><tr><th>局</th><th>你：得分 / 步数</th><th>DQN：得分 / 步数</th><th>一致</th><th>备注</th></tr>" +
-          P.history.slice(-6).map(function (r) {
-            var note = [r.assist ? "辅助" : "", r.knocked ? "有敲掉" : ""].filter(Boolean).join("、") || "–";
-            return "<tr><td>" + r.ep + "</td><td>" + r.you.score + " / " + r.you.steps + "</td><td>" + r.dqn.score + " / " + r.dqn.steps + "</td><td>" +
-              (r.agree === null ? "–" : Math.round(r.agree * 100) + "%") + "</td><td>" + note + "</td></tr>";
-          }).join("") + "</table>";
-      }
-      var dis = P.log.filter(function (r) { return !r.agree; });
-      if (P.over && P.over.fatal && P.over.fatal.agree) dis.push(P.over.fatal);
-      if (dis.length) {
-        h += "<div style='margin-top:6px'>本局「你 ≠ DQN」的时刻（点开回放）：</div><div class='chips'>" +
-          dis.slice(-24).map(function (r) {
-            var fatal = P.over && r === P.over.fatal;
-            return "<button class='chip" + (fatal ? " fatal" : "") + (P.replay === r ? " on" : "") + "' data-step='" + r.step + "'>第 " + r.step + " 步 " + ACT[r.you].arrow + " vs " + ACT[r.dqn].arrow + (fatal ? " 致命" : "") + "</button>";
-          }).join("") + (P.replay ? "<button class='chip' id='b-back'>回到当前</button>" : "") + "</div>";
-      }
-    }
+    var b = app.brain, e = $("explain"), h = "";
+    h += "<p><b>" + b.title + "：</b>" + b.blurb + "</p>";
+    h += "<p><b>右边是它的大脑：</b>从输入到每一层的真实激活，再到 4 个方向的分，全部是真实权重在你的浏览器里实时算出来的；点任何方块或圆点可以把那个神经元敲掉。" +
+      (app.spec.out === "q" ? "输出是 Q 值（“往这边走，以后大概还能拿到多少奖励”）。" : "输出是 4 个方向的打分（logit），换算成概率就是它每一步的“倾向”；旁边的“局面价值”来自它自己的价值网络。") + "</p>";
+    // comparison table: this session + the recorded evaluation
+    var rows = BRAINS.map(function (c) {
+      var r = W.results[c.id] || [], sum = 0, mx = 0;
+      r.forEach(function (g) { sum += g.score; if (g.score > mx) mx = g.score; });
+      var ev = RESULTS[c.id] && RESULTS[c.id]["default"];
+      return "<tr" + (c.id === b.id ? " class='cur'" : "") + "><td>" + c.name + "</td><td>" + (r.length ? fmtNum(sum / r.length, 2) + "（" + r.length + " 局，最高 " + mx + "）" : "–") + "</td>" +
+        "<td>" + (ev ? fmtNum(ev.avg_score, 2) + "（最高 " + ev.max_score + "）" : "–") + "</td></tr>";
+    }).join("");
+    h += "<table class='hist'><tr><th>大脑</th><th>本页看过的局：平均吃到</th><th>固定种子评估 30 局：平均吃到</th></tr>" + rows + "</table>";
+    h += "<p style='color:var(--muted)'>评估数字来自 results/brains.json（种子 " + CFG.watchSeed + "，每个大脑按它默认的选动作方式和护栏设置跑 30 局）；本页的开局顺序和评估一样，不敲神经元、不改设置时前 30 局就是那 30 局。</p>";
     e.innerHTML = h;
     bindTips(e);
   }
@@ -540,7 +286,7 @@
     if (cv.width !== Math.round(s * dpr)) { cv.width = Math.round(s * dpr); cv.height = Math.round(s * dpr); cv.style.width = s + "px"; cv.style.height = s + "px"; }
     var ctx = cv.getContext("2d");
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    var snap = v.snap, n = snap.n, cs = s / n;
+    var snap = v.snap, n = snap.n, nn = n * n, cs = s / n;
     ctx.fillStyle = "#0b1016"; ctx.fillRect(0, 0, s, s);
     ctx.strokeStyle = CFG.colors.grid; ctx.lineWidth = 1;
     for (var i = 0; i <= n; i++) {
@@ -549,8 +295,8 @@
     }
     if (v.fog) {
       var mx = 1e-8;
-      for (i = 0; i < NN; i++) if (v.fog[i] > mx) mx = v.fog[i];
-      for (i = 0; i < NN; i++) {
+      for (i = 0; i < nn; i++) if (v.fog[i] > mx) mx = v.fog[i];
+      for (i = 0; i < nn; i++) {
         var f = v.fog[i] / mx;
         if (f > 0.08) { ctx.fillStyle = "rgba(255,60,40," + (0.55 * f).toFixed(3) + ")"; ctx.fillRect((i % n) * cs, Math.floor(i / n) * cs, cs, cs); }
       }
@@ -600,10 +346,15 @@
     v = Math.max(0, Math.min(1, v));
     return "rgb(" + (Math.min(255, 255 * v * 1.6) | 0) + "," + ((200 * Math.pow(v, 1.6)) | 0) + "," + ((50 * Math.pow(v, 3)) | 0) + ")";
   }
-  function diverge(v) {   // -1..1 -> blue / black / amber
+  function heatRGB(v, out, o) {
+    v = Math.max(0, Math.min(1, v));
+    out[o] = Math.min(255, 255 * v * 1.6) | 0; out[o + 1] = (200 * Math.pow(v, 1.6)) | 0; out[o + 2] = (50 * Math.pow(v, 3)) | 0; out[o + 3] = 255;
+  }
+  function divergeRGB(v, out, o) {   // -1..1 -> blue / black / amber
     v = Math.max(-1, Math.min(1, v));
-    if (v >= 0) return "rgb(" + (255 * v | 0) + "," + (183 * v | 0) + "," + (77 * v | 0) + ")";
-    return "rgb(" + (79 * -v | 0) + "," + (195 * -v | 0) + "," + (247 * -v | 0) + ")";
+    if (v >= 0) { out[o] = 255 * v | 0; out[o + 1] = 183 * v | 0; out[o + 2] = 77 * v | 0; }
+    else { out[o] = 79 * -v | 0; out[o + 1] = 195 * -v | 0; out[o + 2] = 247 * -v | 0; }
+    out[o + 3] = 255;
   }
   function sizeCanvas(cv, w, h) {
     var dpr = window.devicePixelRatio || 1;
@@ -615,144 +366,198 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     return ctx;
   }
-  function drawMap(cv, arr, off, size, scale, div) {
-    var ctx = sizeCanvas(cv, size, size), cs = size / N;
-    for (var r = 0; r < N; r++) for (var c = 0; c < N; c++) {
-      var v = arr[off + r * N + c] / scale;
-      ctx.fillStyle = div ? diverge(v) : heat(v);
-      ctx.fillRect(c * cs, r * cs, cs + 0.5, cs + 0.5);
+  var OFF = document.createElement("canvas");
+  /** Draw a w x h map (arr[off..], row-major) into a `size` px square; scale = value for full brightness. */
+  function drawMap(cv, arr, off, w, h, size, scale, signed) {
+    var ctx = sizeCanvas(cv, size, size);
+    if (OFF.width !== w || OFF.height !== h) { OFF.width = w; OFF.height = h; }
+    var octx = OFF.getContext("2d"), img = octx.createImageData(w, h), px = img.data;
+    for (var i = 0; i < w * h; i++) {
+      var v = arr[off + i] / scale;
+      if (signed) divergeRGB(v, px, 4 * i); else heatRGB(v, px, 4 * i);
     }
+    octx.putImageData(img, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, size, size);
+    ctx.drawImage(OFF, 0, 0, w, h, 0, 0, size, size);
   }
   function fmt(v, d) { return (v >= 0 ? "+" : "") + v.toFixed(d === undefined ? 2 : d); }
 
+  function layerLabel(L, i) {
+    if (L.kind === "conv") return "卷积层 " + i;
+    return "全连接层 " + i;
+  }
+
   function renderFormula() {
-    var s = SIZES, fcShare = (net.w["fc1.weight"].length + net.w["fc1.bias"].length) / net.params;
-    $("formula").innerHTML = "输入 " + META.channels + "×" + N + "×" + N + "<span class='arrow'>→</span>卷积 " + s.conv1 +
-      "<span class='arrow'>→</span>卷积 " + s.conv2 + "<span class='arrow'>→</span>卷积 " + s.conv3 +
-      "<span class='arrow'>→</span>全连接 " + s.fc1 + "<span class='arrow'>→</span>输出 " + s.out + " 个方向的 Q 值" +
-      "<span class='param'>参数 " + net.params.toLocaleString("en-US") + " 个（" + (100 * fcShare).toFixed(1) + "% 在全连接层）· float16</span>";
-    var g = CFG.inputGroups;
-    $("lt-input").innerHTML = "<b>输入层</b> <span class='cnt'>" + (META.channels * NN) + "</span> 维 = " +
-      g.map(function (x) { return x.name + " " + NN; }).join(" + ") + "（每组一张 " + N + "×" + N + " 图）";
-    ["conv1", "conv2", "conv3"].forEach(function (k, i) {
-      $("lt-" + k).innerHTML = "<b>卷积层 " + (i + 1) + "</b> <span class='cnt'>" + s[k] + "</span> 个通道 × " + NN + " 位置 = " + (s[k] * NN).toLocaleString("en-US") +
-        " 个神经元 · 展开贡献最大的 " + app.kConv + " 个通道 · 方阵 = 全部 " + s[k] + " 个（点击敲掉）";
+    var net = app.net, sp = app.spec, parts = ["输入 " + sp.input.c + "×" + sp.input.h + "×" + sp.input.w], ci = 0, fi = 0;
+    net.layers.forEach(function (L, idx) {
+      var last = idx === net.layers.length - 1;
+      if (last) parts.push("输出 " + L.out + " 个方向的" + (sp.out === "q" ? "Q 值" : "分"));
+      else if (L.kind === "conv") { ci++; parts.push("卷积 " + L.cout + "（" + L.k + "×" + L.k + "，步长 " + L.s + "）"); }
+      else { fi++; parts.push("全连接 " + L.out); }
     });
-    $("lt-fc").innerHTML = "<b>全连接层</b> <span class='cnt'>" + s.fc1 + "</span> 个神经元 · 方阵 = 全部（<span id='fc-active'></span>）· 圆点 = 贡献最大的至多 " + CFG.topK.fc +
-      " 个 · 连线 <span style='color:var(--pos)'>橙</span>推高 / <span style='color:var(--neg)'>蓝</span>压低 → <b>输出 " + s.out + " 个方向</b>（% = 按 Q 换算的倾向，仅示意，DQN 总选 Q 最大的）";
-    ["lt-input", "lt-conv1", "lt-conv2", "lt-conv3", "lt-fc"].forEach(function (id) { $(id).title = $(id).textContent; });
+    var fcW = 0;
+    net.layers.forEach(function (L) { if (L.kind === "fc") fcW += net.w[L.name + ".weight"].length + net.w[L.name + ".bias"].length; });
+    $("formula").innerHTML = parts.join("<span class='arrow'>→</span>") +
+      (sp.v.length ? "<span class='arrow'>＋</span>价值网络 → 1 个数" : "") +
+      "<span class='param'>参数 " + net.params.toLocaleString("en-US") + " 个（" + (100 * fcW / net.params).toFixed(1) + "% 在全连接层）· float16</span>";
   }
 
-  function buildInputRow() {
-    var row = $("row-input");
-    row.innerHTML = CFG.inputGroups.map(function (g) {
-      return "<div class='in-map' data-tip='" + g.name + "（" + NN + " 维）：" + g.desc + "'><canvas id='in-" + g.ch + "'></canvas><div class='nm'>" + g.name +
-        " <span class='dims'>" + NN + " 维</span></div><div class='dims'>归因 <span id='inv-" + g.ch + "'></span></div><div class='attr'><i id='ina-" + g.ch + "'></i></div></div>";
-    }).join("");
-    bindTips(row);
+  /** Build the panel DOM for the current brain (input row + one block per hidden layer). */
+  function buildPanel() {
+    var net = app.net, body = $("brain-body"), h = "", geo = app.geo, hw = geo.h * geo.w;
+    h += "<div class='layer' id='L-input'><div class='lt' id='lt-input'><b>输入层</b> <span class='cnt'>" + (geo.c * hw) + "</span> 维 = " +
+      app.inputs.map(function (x) { return x.name + " " + hw; }).join(" + ") + "（每组一张 " + geo.h + "×" + geo.w + " 图）</div>" +
+      "<div class='lrow' id='row-input'>" + app.inputs.map(function (gI, ch) {
+        return "<div class='in-map' data-tip='" + gI.name + "（" + hw + " 维）：" + gI.desc + "'><canvas id='in-" + ch + "'></canvas><div class='nm'>" + gI.name +
+          " <span class='dims'>" + hw + " 维</span></div><div class='dims'>归因 <span id='inv-" + ch + "'></span></div><div class='attr'><i id='ina-" + ch + "'></i></div></div>";
+      }).join("") + "</div>" +
+      "<div class='note'>归因 = 梯度 × 输入（对所选方向打分的一阶近似），<span style='color:var(--pos)'>橙</span>推高、<span style='color:var(--neg)'>蓝</span>压低。<b>这是模型内部的相关性解释，不代表因果。</b></div></div>";
+    var ci = 0, fi = 0, hid = net.hiddenLayers();
+    hid.forEach(function (L, idx) {
+      var last = idx === hid.length - 1, n = L.name;
+      if (L.kind === "conv") {
+        ci++;
+        h += "<div class='layer conv' id='L-" + n + "'><div class='lt' id='lt-" + n + "'><b>卷积层 " + ci + "</b> <span class='cnt'>" + L.cout + "</span> 个通道 × " + L.hout + "×" + L.wout + " 位置 = " +
+          (L.cout * L.hout * L.wout).toLocaleString("en-US") + " 个神经元 · 展开贡献最大的 " + app.kConv + " 个通道 · 方阵 = 全部 " + L.cout + " 个（点击敲掉）</div>" +
+          "<div class='lrow'><div class='tops' id='tops-" + n + "'>" + topSlots(n, L) + "</div><canvas class='sq' id='sq-" + n + "' data-layer='" + n + "' data-tip='全部通道：每个小方块是一个通道的平均激活。点一下 = 敲掉 / 恢复' data-anim='click'></canvas></div></div>";
+      } else if (!last) {
+        fi++;
+        h += "<div class='layer' id='L-" + n + "'><div class='lt' id='lt-" + n + "'><b>全连接层 " + fi + "</b> <span class='cnt'>" + L.out + "</span> 个神经元 · 方阵 = 全部（点击敲掉）· 边框 = 对所选方向贡献最大的几个</div>" +
+          "<canvas class='sq fcgrid' id='sq-" + n + "' data-layer='" + n + "' data-tip='每个小方块是一个神经元的激活。点一下 = 敲掉 / 恢复' data-anim='click'></canvas></div>";
+      } else {
+        fi++;
+        h += "<div class='layer' id='L-fc'><div class='lt' id='lt-fc'><b>全连接层 " + fi + "</b> <span class='cnt'>" + L.out + "</span> 个神经元 · 方阵 = 全部（<span id='fc-active'></span>）· 圆点 = 贡献最大的至多 " + CFG.topK.fc +
+          " 个 · 连线 <span style='color:var(--pos)'>橙</span>推高 / <span style='color:var(--neg)'>蓝</span>压低 → <b>输出 4 个方向</b>" +
+          (app.spec.out === "q" ? "（% = 按 Q 换算的倾向，仅示意，DQN 总选 Q 最大的）" : "（% = 模型自己的概率）") + "</div>" +
+          "<canvas id='fc-canvas' data-layer='" + n + "'></canvas></div>";
+      }
+    });
+    body.innerHTML = h;
+    bindTips(body);
+    body.querySelectorAll(".lt").forEach(function (el) { el.title = el.textContent; });
   }
-
-  function buildTops(layer) {
-    var box = $("tops-" + layer), k = CFG.topK.conv, h = "";
-    for (var i = 0; i < k; i++) h += "<div class='fm' data-layer='" + layer + "' data-slot='" + i + "' data-tip='这个通道在 " + N + "×" + N + " 棋盘上的激活图。点一下 = 敲掉 / 恢复' data-anim='click'><canvas></canvas><div class='cap'></div></div>";
-    box.innerHTML = h;
-    bindTips(box);
+  function topSlots(layer, L) {
+    var h = "";
+    for (var i = 0; i < CFG.topK.conv; i++) h += "<div class='fm' data-layer='" + layer + "' data-slot='" + i + "' data-tip='这个通道在 " + L.hout + "×" + L.wout + " 的特征图上的激活。点一下 = 敲掉 / 恢复' data-anim='click'><canvas></canvas><div class='cap'></div></div>";
+    return h;
   }
 
   var hits = { fc: [], sq: {} };
 
   function renderBrain() {
     var v = app.view;
-    if (!v || !v.res) return;
-    var res = v.res, sz = app.sizes, act = res.action;
+    if (!v || !v.res || !v.res.contrib) return;
+    var res = v.res, sz = app.sizes, net = app.net, geo = app.geo, hw = geo.h * geo.w;
     $("view-label").innerHTML = v.label || "";
     var kc = net.knockCount();
     $("knock-info").textContent = kc ? "已敲掉 " + kc + " 个" : "";
     $("btn-restore").disabled = kc === 0;
-    var cover = $("brain-cover");
-    if (v.cover) { cover.hidden = false; cover.innerHTML = "走出第一步后，这里揭晓 DQN 在<b>同一局面</b>的想法。<br><span style='font-size:13px;color:var(--muted)'>想边走边看？在左边勾选「辅助：提前显示 DQN 的建议」。</span>"; }
-    else cover.hidden = true;
 
-    // ---- input
-    var x = (v.inputSnap ? envFromSnap(v.inputSnap) : envFromSnap(v.snap)).state();
+    // ---- input planes
+    var x = envFromSnap(v.snap).obs(app.spec.obs);
     var ci = res.contrib.input, mxa = 1e-8;
     for (var c = 0; c < ci.length; c++) mxa = Math.max(mxa, Math.abs(ci[c]));
-    CFG.inputGroups.forEach(function (g) {
-      drawMap($("in-" + g.ch), x, g.ch * NN, sz.map, 1, g.ch >= 3);
-      var a = ci[g.ch] / mxa, bar = $("ina-" + g.ch);
+    app.inputs.forEach(function (gI, ch) {
+      drawMap($("in-" + ch), x, ch * hw, geo.w, geo.h, sz.map, 1, !!gI.signed);
+      var a = ci[ch] / mxa, bar = $("ina-" + ch);
       bar.style.left = (a >= 0 ? 50 : 50 + 50 * a) + "%";
       bar.style.width = (50 * Math.abs(a)) + "%";
       bar.style.background = a >= 0 ? CFG.colors.pos : CFG.colors.neg;
-      $("inv-" + g.ch).textContent = fmt(ci[g.ch]);
+      $("inv-" + ch).textContent = fmt(ci[ch]);
     });
 
-    // ---- conv layers
-    [["conv1", res.a1], ["conv2", res.a2], ["conv3", res.a3]].forEach(function (pair) {
-      var layer = pair[0], a = pair[1], C = SIZES[layer], contrib = res.contrib[layer];
-      var order = [];
-      for (var i = 0; i < C; i++) order.push(i);
-      order.sort(function (p, q) { return Math.abs(contrib[q]) - Math.abs(contrib[p]); });
-      var tops = order.filter(function (c2) { return contrib[c2] !== 0; }).slice(0, app.kConv);
-      var slots = $("tops-" + layer).children;
-      for (var sl = 0; sl < slots.length; sl++) {
-        slots[sl].style.visibility = sl < tops.length ? "visible" : "hidden";
-        slots[sl].style.display = sl < app.kConv || sl < tops.length ? "" : "none";   // 手机紧凑画法：多余的槽位不占位
-        if (sl >= tops.length) delete slots[sl].dataset.ch;
-      }
-      tops.forEach(function (ch, s) {
-        var el = slots[s], cv = el.querySelector("canvas"), mx = 1e-8;
-        for (var p = 0; p < NN; p++) mx = Math.max(mx, a[ch * NN + p]);
-        drawMap(cv, a, ch * NN, sz.map, mx, false);
-        var cc = contrib[ch], off = net.isKnocked(layer, ch);
-        el.className = "fm " + (off ? "off" : (cc >= 0 ? "pos" : "neg"));
-        el.dataset.ch = ch;
-        var cap = el.querySelector(".cap");
-        cap.className = "cap " + (cc >= 0 ? "pos" : "neg");
-        cap.textContent = "#" + ch + " " + fmt(cc);
-      });
-      // full-layer square: mean activation per channel
-      var cols = 8, rows = Math.ceil(C / cols), t = Math.max(5, Math.min(16, Math.floor((sz.map + 18) / rows)));
-      var cv2 = $("sq-" + layer), ctx = sizeCanvas(cv2, cols * t, rows * t), means = new Float32Array(C), mm = 1e-8;
-      for (i = 0; i < C; i++) { var s2 = 0; for (var p2 = 0; p2 < NN; p2++) s2 += a[i * NN + p2]; means[i] = s2 / NN; mm = Math.max(mm, means[i]); }
-      ctx.clearRect(0, 0, cols * t, rows * t);
-      for (i = 0; i < C; i++) {
-        var cx = (i % cols) * t, cy = Math.floor(i / cols) * t;
-        if (net.isKnocked(layer, i)) {
-          ctx.fillStyle = "#333"; ctx.fillRect(cx + 0.5, cy + 0.5, t - 1, t - 1);
-          ctx.strokeStyle = "#ff6b6b"; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(cx + 2, cy + 2); ctx.lineTo(cx + t - 2, cy + t - 2);
-          ctx.moveTo(cx + t - 2, cy + 2); ctx.lineTo(cx + 2, cy + t - 2); ctx.stroke();
-        } else { ctx.fillStyle = heat(means[i] / mm); ctx.fillRect(cx + 0.5, cy + 0.5, t - 1, t - 1); }
-        if (tops.indexOf(i) >= 0) { ctx.strokeStyle = contrib[i] >= 0 ? CFG.colors.pos : CFG.colors.neg; ctx.lineWidth = 1.5; ctx.strokeRect(cx + 1, cy + 1, t - 2, t - 2); }
-      }
-      hits.sq[layer] = { cols: cols, t: t, C: C };
+    // ---- hidden layers
+    var hid = net.hiddenLayers();
+    hid.forEach(function (L, idx) {
+      var last = idx === hid.length - 1, name = L.name, a = res.acts[name].a, contrib = res.contrib[name], C = L.units;
+      if (L.kind === "conv") renderConv(L, a, contrib);
+      else if (!last) renderFCGrid(L, a, contrib);
+      else renderFC(L, res);
     });
-
-    renderFC(res, act);
     renderValue(v);
   }
 
-  function renderFC(res, act) {
-    var cv = $("fc-canvas"), W0 = app.sizes.brainW, H0 = app.sizes.fcH, ctx = sizeCanvas(cv, W0, H0);
+  function topOrder(contrib, k) {
+    var order = [];
+    for (var i = 0; i < contrib.length; i++) order.push(i);
+    order.sort(function (p, q) { return Math.abs(contrib[q]) - Math.abs(contrib[p]); });
+    return order.filter(function (c) { return contrib[c] !== 0; }).slice(0, k);
+  }
+
+  function renderConv(L, a, contrib) {
+    var name = L.name, C = L.cout, mhw = L.hout * L.wout, sz = app.sizes, net = app.net;
+    var tops = topOrder(contrib, app.kConv);
+    var slots = $("tops-" + name).children;
+    for (var sl = 0; sl < slots.length; sl++) {
+      slots[sl].style.visibility = sl < tops.length ? "visible" : "hidden";
+      slots[sl].style.display = sl < app.kConv || sl < tops.length ? "" : "none";
+      if (sl >= tops.length) delete slots[sl].dataset.ch;
+    }
+    tops.forEach(function (ch, s) {
+      var el = slots[s], cv = el.querySelector("canvas"), mx = 1e-8;
+      for (var p = 0; p < mhw; p++) mx = Math.max(mx, a[ch * mhw + p]);
+      drawMap(cv, a, ch * mhw, L.wout, L.hout, sz.map, mx, false);
+      var cc = contrib[ch], off = net.isKnocked(name, ch);
+      el.className = "fm " + (off ? "off" : (cc >= 0 ? "pos" : "neg"));
+      el.dataset.ch = ch;
+      var cap = el.querySelector(".cap");
+      cap.className = "cap " + (cc >= 0 ? "pos" : "neg");
+      cap.textContent = "#" + ch + " " + fmt(cc);
+    });
+    // full-layer square: mean activation per channel
+    var cols = 8, rows = Math.ceil(C / cols), t = Math.max(5, Math.min(16, Math.floor((sz.map + 18) / rows)));
+    var cv2 = $("sq-" + name), ctx = sizeCanvas(cv2, cols * t, rows * t), means = new Float32Array(C), mm = 1e-8;
+    for (var i = 0; i < C; i++) { var s2 = 0; for (var p2 = 0; p2 < mhw; p2++) s2 += a[i * mhw + p2]; means[i] = s2 / mhw; mm = Math.max(mm, means[i]); }
+    ctx.clearRect(0, 0, cols * t, rows * t);
+    for (i = 0; i < C; i++) {
+      var cx = (i % cols) * t, cy = Math.floor(i / cols) * t;
+      if (net.isKnocked(name, i)) {
+        ctx.fillStyle = "#333"; ctx.fillRect(cx + 0.5, cy + 0.5, t - 1, t - 1);
+        ctx.strokeStyle = "#ff6b6b"; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(cx + 2, cy + 2); ctx.lineTo(cx + t - 2, cy + t - 2);
+        ctx.moveTo(cx + t - 2, cy + 2); ctx.lineTo(cx + 2, cy + t - 2); ctx.stroke();
+      } else { ctx.fillStyle = heat(means[i] / mm); ctx.fillRect(cx + 0.5, cy + 0.5, t - 1, t - 1); }
+      if (tops.indexOf(i) >= 0) { ctx.strokeStyle = contrib[i] >= 0 ? CFG.colors.pos : CFG.colors.neg; ctx.lineWidth = 1.5; ctx.strokeRect(cx + 1, cy + 1, t - 2, t - 2); }
+    }
+    hits.sq[name] = { cols: cols, t: t, C: C };
+  }
+
+  function renderFCGrid(L, h, contrib) {
+    var name = L.name, H = L.out, net = app.net, side = Math.ceil(Math.sqrt(H));
+    var t = Math.max(6, Math.min(14, Math.floor((app.sizes.map + 40) / side)));
+    var cv = $("sq-" + name), ctx = sizeCanvas(cv, side * t, side * t), mh = 1e-8, i;
+    for (i = 0; i < H; i++) mh = Math.max(mh, h[i]);
+    var tops = topOrder(contrib, Math.min(CFG.topK.fc, 12));
+    ctx.clearRect(0, 0, side * t, side * t);
+    for (i = 0; i < H; i++) {
+      var cx = (i % side) * t, cy = Math.floor(i / side) * t;
+      if (net.isKnocked(name, i)) { ctx.fillStyle = "#444"; ctx.fillRect(cx + 0.5, cy + 0.5, t - 1, t - 1); ctx.strokeStyle = "#ff6b6b"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(cx + 1, cy + 1); ctx.lineTo(cx + t - 1, cy + t - 1); ctx.stroke(); }
+      else { ctx.fillStyle = heat(h[i] / mh); ctx.fillRect(cx + 0.5, cy + 0.5, t - 1, t - 1); }
+      if (tops.indexOf(i) >= 0) { ctx.strokeStyle = contrib[i] >= 0 ? CFG.colors.pos : CFG.colors.neg; ctx.lineWidth = 1.2; ctx.strokeRect(cx + 1, cy + 1, t - 2, t - 2); }
+    }
+    hits.sq[name] = { cols: side, t: t, C: H };
+  }
+
+  function renderFC(L, res) {
+    var cv = $("fc-canvas"), W0 = app.sizes.brainW, H0 = app.sizes.fcH, ctx = sizeCanvas(cv, W0, H0), net = app.net;
     ctx.clearRect(0, 0, W0, H0);
-    var H = SIZES.fc1, h = res.h, contrib = res.contrib.fc1, fcOut = res.fcOut;
+    var name = L.name, H = L.out, h = res.acts[name].a, contrib = res.contrib[name], fcOut = res.fcOut;
+    var inv = invMap(), act = res.action;
     hits.fc = [];
-    // left: 16x16 grid of all neurons (activation)
+    // left: grid of all neurons (activation)
     var side = Math.ceil(Math.sqrt(H)), g = Math.min(H0 - 4, Math.floor(W0 * 0.3)), cs = g / side, mh = 1e-8, i;
     for (i = 0; i < H; i++) mh = Math.max(mh, h[i]);
-    var order = [];
-    for (i = 0; i < H; i++) order.push(i);
-    order.sort(function (p, q) { return Math.abs(contrib[q]) - Math.abs(contrib[p]); });
     var active = 0;
     for (i = 0; i < H; i++) if (h[i] > 0) active++;
-    var tops = order.filter(function (j) { return contrib[j] !== 0; }).slice(0, CFG.topK.fc), K = tops.length, top1 = tops[0];
+    var tops = topOrder(contrib, CFG.topK.fc), K = tops.length, top1 = tops[0];
     for (i = 0; i < H; i++) {
       var gx = (i % side) * cs, gy = Math.floor(i / side) * cs + 2;
-      if (net.isKnocked("fc1", i)) { ctx.fillStyle = "#444"; ctx.fillRect(gx + 0.5, gy + 0.5, cs - 1, cs - 1); ctx.strokeStyle = "#ff6b6b"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(gx + 1, gy + 1); ctx.lineTo(gx + cs - 1, gy + cs - 1); ctx.stroke(); }
+      if (net.isKnocked(name, i)) { ctx.fillStyle = "#444"; ctx.fillRect(gx + 0.5, gy + 0.5, cs - 1, cs - 1); ctx.strokeStyle = "#ff6b6b"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(gx + 1, gy + 1); ctx.lineTo(gx + cs - 1, gy + cs - 1); ctx.stroke(); }
       else { ctx.fillStyle = heat(h[i] / mh); ctx.fillRect(gx + 0.5, gy + 0.5, cs - 1, cs - 1); }
       if (tops.indexOf(i) >= 0) { ctx.strokeStyle = contrib[i] >= 0 ? CFG.colors.pos : CFG.colors.neg; ctx.lineWidth = 1; ctx.strokeRect(gx + 0.5, gy + 0.5, cs - 1, cs - 1); }
       hits.fc.push({ x: gx, y: gy, w: cs, h: cs, j: i, top1: i === top1 });
     }
-    // middle: top-K dots in 2 columns (compact spacing on narrow screens)
+    // middle: top-K dots in 2 columns
     var compact = W0 < 560;
     var colN = Math.max(1, Math.ceil(K / 2)), rowH = (H0 - 8) / colN, r = Math.max(4, Math.min(rowH * 0.36, 9));
     var dx0 = g + (compact ? 22 : 26), dx1 = dx0 + (compact ? 40 : 54), outX = compact ? dx1 + 30 : Math.max(dx1 + 110, W0 - 230), dots = [];
@@ -762,49 +567,51 @@
       var col = k < colN ? 0 : 1, row = k % colN;
       dots.push({ j: j, x: col ? dx1 : dx0, y: 4 + rowH * (row + 0.5) });
     });
-    // output rows
     var rowsY = [], oh = (H0 - 8) / 4;
     for (var o = 0; o < 4; o++) rowsY.push(4 + oh * (o + 0.5));
-    // lines: strongest |h_j * W2[o,j]| among the shown dots
+    // lines: strongest |h_j * W[o,j]| among the shown dots (o = env order row, fcOut indexed by brain order)
     var lines = [];
-    dots.forEach(function (d) { for (var o2 = 0; o2 < 4; o2++) lines.push({ d: d, o: o2, v: fcOut[o2][d.j] }); });
+    dots.forEach(function (d) { for (var o2 = 0; o2 < 4; o2++) lines.push({ d: d, o: o2, v: fcOut[inv[o2]][d.j] }); });
     lines.sort(function (p, q) { return Math.abs(q.v) - Math.abs(p.v); });
     var ml = lines.length ? Math.abs(lines[0].v) || 1e-8 : 1;
-    lines.slice(0, CFG.topK.lines).forEach(function (L) {
-      ctx.strokeStyle = (L.v >= 0 ? "rgba(255,183,77," : "rgba(79,195,247,") + (0.25 + 0.6 * Math.abs(L.v) / ml).toFixed(2) + ")";
-      ctx.lineWidth = 0.6 + 3 * Math.abs(L.v) / ml;
-      ctx.beginPath(); ctx.moveTo(L.d.x + r, L.d.y);
-      ctx.bezierCurveTo((L.d.x + outX) / 2, L.d.y, (L.d.x + outX) / 2, rowsY[L.o], outX - 4, rowsY[L.o]); ctx.stroke();
+    lines.slice(0, CFG.topK.lines).forEach(function (Ln) {
+      ctx.strokeStyle = (Ln.v >= 0 ? "rgba(255,183,77," : "rgba(79,195,247,") + (0.25 + 0.6 * Math.abs(Ln.v) / ml).toFixed(2) + ")";
+      ctx.lineWidth = 0.6 + 3 * Math.abs(Ln.v) / ml;
+      ctx.beginPath(); ctx.moveTo(Ln.d.x + r, Ln.d.y);
+      ctx.bezierCurveTo((Ln.d.x + outX) / 2, Ln.d.y, (Ln.d.x + outX) / 2, rowsY[Ln.o], outX - 4, rowsY[Ln.o]); ctx.stroke();
     });
     dots.forEach(function (d, k) {
-      var off = net.isKnocked("fc1", d.j), cc = contrib[d.j];
+      var off = net.isKnocked(name, d.j), cc = contrib[d.j];
       ctx.fillStyle = off ? "#444" : heat(h[d.j] / mh);
       ctx.beginPath(); ctx.arc(d.x, d.y, r, 0, Math.PI * 2); ctx.fill();
       ctx.strokeStyle = off ? "#ff6b6b" : (cc >= 0 ? CFG.colors.pos : CFG.colors.neg);
       ctx.lineWidth = 1 + 2 * Math.abs(cc) / mc; ctx.stroke();
       ctx.fillStyle = "#8b98a8"; ctx.font = "10px Consolas, Menlo, monospace"; ctx.textAlign = "right"; ctx.textBaseline = "middle";
       if (k < colN) ctx.fillText("#" + d.j, d.x - r - 3, d.y);
-      else { ctx.textAlign = "left"; ctx.fillText("#" + d.j, d.x + r + 3, d.y - r - 1 > 0 ? d.y : d.y); }
+      else { ctx.textAlign = "left"; ctx.fillText("#" + d.j, d.x + r + 3, d.y); }
       hits.fc.push({ x: d.x - r - 2, y: d.y - r - 2, w: 2 * r + 4, h: 2 * r + 4, j: d.j, top1: d.j === top1 });
     });
-    // outputs
-    var q = res.q, legal = res.legal, prob = BrainNet.softmaxLegal(q, legal), qhi = -Infinity, qlo = 0;
+    // outputs (rows in env order: 上 下 左 右)
+    var q = res.q, mask = res.mask, prob = res.probs, qhi = -Infinity, qlo = Infinity;
     for (o = 0; o < 4; o++) { qhi = Math.max(qhi, q[o]); qlo = Math.min(qlo, q[o]); }
+    if (app.spec.out === "q") qlo = Math.min(0, qlo);
     if (qhi - qlo < 1e-6) qhi = qlo + 1;
-    var barX = outX + (compact ? 24 : 40), barW = Math.max(40, W0 - barX - (compact ? 66 : 90));
+    var barX = outX + (compact ? 24 : 40), barW = Math.max(40, W0 - barX - (compact ? 70 : 96));
     ctx.textBaseline = "middle";
+    var opp = SnakeEnv.OPPOSITE[app.view.snap.dir];
     for (o = 0; o < 4; o++) {
-      var y = rowsY[o], chosen = o === act, il = !legal[o];
+      var bi = inv[o], y = rowsY[o], chosen = bi === act, il = !mask[bi];
       ctx.globalAlpha = il ? 0.35 : 1;
       ctx.fillStyle = chosen ? CFG.colors.chosen : "#dde5ee"; ctx.font = "bold 13px 'Microsoft YaHei','PingFang SC',sans-serif"; ctx.textAlign = "left";
       ctx.fillText(compact ? ACT[o].arrow : ACT[o].arrow + " " + ACT[o].name, outX, y);
       ctx.fillStyle = "#0b1016"; ctx.fillRect(barX, y - 9, barW, 18);
-      var wq = barW * Math.max(0.03, (q[o] - qlo) / (qhi - qlo));
+      var wq = barW * Math.max(0.03, (q[bi] - qlo) / (qhi - qlo));
       ctx.fillStyle = chosen ? CFG.colors.chosen : "#355d83"; ctx.fillRect(barX, y - 9, wq, 18);
       ctx.fillStyle = "#dde5ee"; ctx.font = (compact ? "11px" : "12px") + " Consolas, Menlo, monospace";
-      ctx.fillText("Q " + q[o].toFixed(compact ? 2 : 3), barX + barW + 5, y - 6);
+      ctx.fillText((app.spec.out === "q" ? "Q " : "分 ") + q[bi].toFixed(compact ? 2 : 3), barX + barW + 5, y - 6);
       ctx.fillStyle = "#8b98a8"; ctx.font = (compact ? "10.5px" : "11px") + " 'Microsoft YaHei','PingFang SC',sans-serif";
-      ctx.fillText(il ? (compact ? "不允许" : "掉头·不允许") : (chosen ? "✓ " : "") + Math.round(prob[o] * 100) + "%", barX + barW + 5, y + 8);
+      var why = il ? (o === opp ? (compact ? "掉头" : "掉头·不允许") : (compact ? "护栏" : "护栏·会撞死")) : (chosen ? "✓ " : "") + Math.round(prob[bi] * 100) + "%";
+      ctx.fillText(why, barX + barW + 5, y + 8);
       ctx.globalAlpha = 1;
     }
     app._fcTop1 = top1;
@@ -812,8 +619,8 @@
   }
 
   function renderValue(v) {
-    var res = v.res, val = maxLegal(res.q, res.legal);
-    $("value-text").innerHTML = "局面价值 <b>" + val.toFixed(2) + "</b>";
+    var res = v.res, val = valueOf(res);
+    $("value-text").innerHTML = (app.spec.v.length ? "局面价值（价值网络）<b>" : "局面价值 <b>") + val.toFixed(2) + "</b>";
     var cv = $("value-curve"), w = 110, hgt = 22;
     var ctx = sizeCanvas(cv, w, hgt), arr = v.curve || [];
     ctx.clearRect(0, 0, w, hgt);
@@ -826,29 +633,24 @@
   }
 
   // ================================================================== knock-out
-  function toggleKnock(layer, idx, top1) {
-    var off = !net.isKnocked(layer, idx);
-    net.setKnock(layer, idx, off);
+  function toggleKnock(layer, idx) {
+    var off = !app.net.isKnocked(layer, idx);
+    app.net.setKnock(layer, idx, off);
     reanalyze();
-    toast((off ? "已敲掉 " : "已恢复 ") + (layer === "fc1" ? "全连接层神经元 #" : layer.replace("conv", "卷积层 ") + " 通道 #") + idx);
-    practiceEvent("knock", { layer: layer, idx: idx, off: off, top1: !!top1 });
+    var L = app.net.layer(layer);
+    toast((off ? "已敲掉 " : "已恢复 ") + (L && L.kind === "conv" ? "卷积层通道 #" : "全连接层神经元 #") + idx);
   }
   function fcTop1(res) {
-    var c = res.contrib.fc1, best = 0;
+    var c = res.contrib[app.lastHidden.name], best = 0;
     for (var j = 1; j < c.length; j++) if (Math.abs(c[j]) > Math.abs(c[best])) best = j;
     return best;
   }
   function reanalyze() {
-    if (app.mode === "play") {
-      if (P.env && !P.over) { P.cur = analyze(P.env); }
-      if (P.prev && P.prevSnap) { var e = envFromSnap(P.prevSnap); P.prev = net.forward(e.state(), e.legalMask(), true); }
-      setPlayView();
-    } else {
-      if (!W.over) { W.lastRes = analyze(W.env); }
-      else { var e2 = envFromSnap(W.over.snapBefore); W.lastRes = net.forward(e2.state(), e2.legalMask(), true); }
-      setWatchView();
-    }
+    if (!W.over) { W.lastRes = analyze(W.env, true); }
+    else { W.lastRes = analyze(envFromSnap(W.over.snapBefore), true); }
+    setWatchView();
   }
+  function restoreAll() { app.net.restoreAll(); reanalyze(); toast("所有神经元已恢复"); }
 
   // ================================================================== layout / render loop
   /** 触屏 / 手机竖屏判断（v2 第八节：触屏 + 宽度 ≤ 980px + 竖屏；768×1024 的平板也算）。 */
@@ -859,31 +661,24 @@
     var before = app.touchp;
     app.touch = touch;
     app.touchp = touch && w <= 980 && portrait;
-    app.touchl = touch && w <= 980 && !portrait;
     document.body.classList.toggle("touch", app.touch);
     document.body.classList.toggle("touchp", app.touchp);
-    document.body.classList.toggle("touchl", app.touchl);
     document.documentElement.classList.toggle("touchp", app.touchp);
-    document.documentElement.classList.toggle("touchp-play", app.touchp && app.mode === "play");
-    $("rotate-hint").hidden = !app.touchl;
     app.kConv = app.touchp && w < 600 ? 4 : CFG.topK.conv;
-    if (!app.touchp) { setSheet(false); $("menu").hidden = true; }
-    if (before !== app.touchp) { renderFormula(); renderOpts(); renderControls(); if (app.mode === "play") setPlayView(); }
+    if (!app.touchp) { $("menu").hidden = true; }
+    if (before !== app.touchp && app.net) { renderOpts(); renderControls(); }
     return app.touchp;
   }
 
   function layoutMobile() {
-    var main = $("main"), left = $("left"), right = $("right"), inner = left.clientWidth - 16;
-    var b;
-    if (app.mode === "play") {
-      var avail = main.clientHeight - $("touchctl").offsetHeight - $("pills").offsetHeight - 36;
-      b = Math.max(150, Math.min(inner - 2, avail));
-    } else b = Math.min(inner - 2, 640);
+    var left = $("left"), right = $("right"), inner = left.clientWidth - 16, N = app.N;
+    var b = Math.min(inner - 2, 640);
     app.sizes.board = Math.max(N * 10, Math.floor(b / N) * N);
     var rw = right.clientWidth - 18;
     if (rw < 120) rw = window.innerWidth - 16 - 18;
     app.sizes.brainW = Math.max(240, rw);
-    app.sizes.map = Math.max(28, Math.floor(Math.min(64, (inner - 44) / 5) / 2) * 2);
+    var per = Math.max(3, app.inputs.length);
+    app.sizes.map = Math.max(28, Math.floor(Math.min(64, (inner - 44) / per) / 2) * 2);
     app.sizes.fcH = inner < 600 ? 250 : 300;
     if (!app.view || !app.alive) { markDirty(); return; }
     drawBoard(); renderBrain(); renderPills();
@@ -891,18 +686,20 @@
 
   function layout() {
     if (app.touchp) { layoutMobile(); return; }
-    var main = $("main"), left = $("left"), right = $("right");
+    var main = $("main"), left = $("left"), right = $("right"), N = app.N;
     var lw = left.clientWidth, mh = main.clientHeight;
-    var reserve = app.mode === "practice" ? 420 : (mh < 700 ? 255 : (app.mode === "play" ? 330 : 300));
+    var reserve = mh < 700 ? 300 : 340;
     var b = Math.max(220, Math.min(lw - 24, mh - reserve, 680));
     app.sizes.board = Math.floor(b / N) * N;
     var rw = right.clientWidth - 22, rh = right.clientHeight;
     app.sizes.brainW = Math.max(300, rw);
-    var s = (rh - 268 - 130) / 4;
+    var nConv = app.net.hiddenLayers().filter(function (L) { return L.kind === "conv"; }).length;
+    var rowsN = 1 + nConv + Math.max(0, app.net.hiddenLayers().length - nConv - 1);
+    var s = (rh - 268 - 130) / Math.max(2, rowsN);
     var byW = (rw - 120) / (CFG.topK.conv + 2.2) - 8;
     s = Math.max(30, Math.min(s, byW, 86));
     app.sizes.map = Math.floor(s / 2) * 2;
-    app.sizes.fcH = Math.max(120, Math.min(320, Math.round(rh - 4 * app.sizes.map - 268)));
+    app.sizes.fcH = Math.max(120, Math.min(320, Math.round(rh - rowsN * app.sizes.map - 268)));
     fit();
   }
 
@@ -939,7 +736,6 @@
   // ================================================================== tooltips with animated demos
   var DEMOS = {
     click: "<div class='demo demo-click'><i class='d-dot'></i><i class='d-dot'></i><i class='d-dot target'></i><i class='d-cursor'></i></div>",
-    keys: "<div class='demo demo-keys'><i class='k k-up'>↑</i><i class='k k-left'>←</i><i class='k k-down'>↓</i><i class='k k-right'>→</i></div>",
     step: "<div class='demo demo-step'><i class='bar b1'></i><i class='bar b2'></i><i class='bar b3'></i></div>",
     fog: "<div class='demo demo-fog'><i class='cell' style='left:60px;top:20px'></i><i class='cell' style='left:78px;top:20px;animation-delay:.3s'></i><i class='cell' style='left:96px;top:20px;animation-delay:.6s'></i></div>"
   };
@@ -952,7 +748,7 @@
     });
   }
   function showTip(el, text) {
-    if (app.touch) return;   // 触屏上没有悬停，不弹说明气泡（轻点会触发模拟的 mouseenter）
+    if (app.touch) return;   // 触屏上没有悬停，不弹说明气泡
     var tip = $("tip");
     tip.innerHTML = (text || el.dataset.tip) + (el.dataset && el.dataset.anim && DEMOS[el.dataset.anim] ? DEMOS[el.dataset.anim] : "");
     tip.hidden = false;
@@ -993,10 +789,8 @@
     app.timers = [];
     listeners.forEach(function (l) { l[0].removeEventListener(l[1], l[2], l[3]); });
     listeners = [];
-    if (app.touchCtl) { app.touchCtl.unbind(); app.touchCtl = null; }
-    W.env = null; P.env = null; app.view = null;
-    net = null;
-    window.SNAKE_MODEL = null;
+    W.env = null; app.view = null; app.net = null;
+    window.SNAKE_MODEL = null; window.SNAKE_BRAINS = null;
     try { window.close(); } catch (e) { /* ignore */ }
     setTimeout(function () {
       document.body.innerHTML = "<div class='ended'>已停止运行，所有计算都已结束，可以直接关闭这个标签页。</div>";
@@ -1009,97 +803,56 @@
     if (e.target && /input|textarea|select/i.test(e.target.tagName) && e.target.type !== "checkbox" && e.target.type !== "range") return;
     var k = e.key;
     if (!$("help").hidden) { if (k === "Escape" || k === "Enter" || k === "h" || k === "H") { closeHelp(); e.preventDefault(); } return; }
-    var dirMap = { ArrowUp: 0, ArrowDown: 1, ArrowLeft: 2, ArrowRight: 3, w: 0, s: 1, a: 2, d: 3, W: 0, S: 1, A: 2, D: 3 };
-    if (app.mode === "play" && k in dirMap) { e.preventDefault(); playKey(dirMap[k]); return; }
     if (k === "h" || k === "H" || k === "?") { openHelp(); return; }
     if (k === "b" || k === "B") { setBig(!document.body.classList.contains("big")); return; }
-    if (k === "1") return setMode("watch");
-    if (k === "2") return setMode("play");
-    if (k === "3") return setMode("practice");
-    if (app.mode === "play") {
-      if (k === "Enter" && P.over) { playNewGame(); renderControls(); renderPills(); }
-      else if ((k === "r" || k === "R")) { playNewGame(); renderControls(); renderPills(); }
-      else if (k === " " && P.ms > 0 && P.started && !P.over) { e.preventDefault(); P.paused = !P.paused; schedulePlay(); renderControls(); }
-      return;
-    }
+    for (var i = 0; i < BRAINS.length; i++) if (k === BRAINS[i].key) { setBrain(BRAINS[i].id); return; }
     if (k === " ") { e.preventDefault(); setWatchPlaying(!W.playing); }
     else if (k === "ArrowRight" || k === ".") { e.preventDefault(); manualStep(); }
-    else if (k === "r" || k === "R") { hideBanner(); watchRestart(); }
-  }
-
-  function manualStep() {
-    if (W.playing) setWatchPlaying(false);
-    if (W.over) { hideBanner(); watchNextGame(); }
-    else watchStep();
-    practiceEvent("manual-step");
+    else if (k === "r" || k === "R") { hideBanner(); watchRestart(); renderExplain(); }
   }
 
   function onClick(e) {
     var t = e.target;
     if (!t.closest("#menu") && t.id !== "menu-btn") { $("menu").hidden = true; $("menu-btn").setAttribute("aria-expanded", "false"); }
-    var tab = t.closest(".tab");
-    if (tab) { setMode(tab.dataset.mode); return; }
     var pre = t.closest(".preset");
     if (pre) {
-      var i = +pre.dataset.i;
-      if (pre.dataset.kind === "speed") { W.speedIdx = i; W.ms = CFG.watchSpeeds[i].ms; renderOpts(); scheduleWatch(); practiceEvent("speed"); }
-      else {
-        P.levelIdx = i; P.ms = CFG.playLevels[i].ms; renderOpts(); renderControls();
-        if (P.ms === 0) { cancel(P.timer); P.timer = null; } else if (P.started && !P.over && !P.paused) schedulePlay();
-        setPlayView();
-      }
+      if (pre.dataset.kind === "brain") { if (pre.dataset.id !== app.brain.id) setBrain(pre.dataset.id); }
+      else if (pre.dataset.kind === "speed") { var i = +pre.dataset.i; W.speedIdx = i; W.ms = CFG.watchSpeeds[i].ms; renderOpts(); scheduleWatch(); }
+      else if (pre.dataset.kind === "policy") { app.policy = pre.dataset.v; renderOpts(); reanalyze(); }
       return;
     }
     var fm = t.closest(".fm");
-    if (fm && fm.dataset.ch !== undefined) { toggleKnock(fm.dataset.layer, +fm.dataset.ch, false); return; }
-    var chip = t.closest(".chip");
-    if (chip) {
-      if (chip.id === "b-back") { P.replay = null; }
-      else {
-        var st = +chip.dataset.step;
-        P.replay = P.log.filter(function (r) { return r.step === st; })[0] || null;
-        if (P.replay) { cancel(P.timer); P.timer = null; if (P.ms > 0 && P.started && !P.over) P.paused = true; practiceEvent("replay"); }
-      }
-      setPlayView(); renderExplain(); renderControls();
-      return;
-    }
+    if (fm && fm.dataset.ch !== undefined) { toggleKnock(fm.dataset.layer, +fm.dataset.ch); return; }
+    if (t.classList && t.classList.contains("sq")) { var ii = sqHit(e, t.dataset.layer); if (ii !== null) toggleKnock(t.dataset.layer, ii); return; }
+    if (t.id === "fc-canvas") { var hh = canvasHit(e, hits.fc); if (hh) toggleKnock(t.dataset.layer, hh.j); return; }
     switch (t.id) {
       case "b-play": setWatchPlaying(!W.playing); break;
       case "b-step": manualStep(); break;
-      case "b-reset": hideBanner(); watchRestart(); scheduleWatch(); break;
-      case "b-next": playNewGame(); renderControls(); renderPills(); break;
-      case "b-pause": P.paused = !P.paused; schedulePlay(); renderControls(); break;
-      case "btn-restore": net.restoreAll(); reanalyze(); toast("所有神经元已恢复"); practiceEvent("restore"); break;
+      case "b-reset": hideBanner(); watchRestart(); renderExplain(); scheduleWatch(); break;
+      case "btn-restore": restoreAll(); break;
       case "btn-help": openHelp(); break;
       case "help-close": closeHelp(); break;
       case "btn-exit": shutdown(); break;
-      case "b-tasks-reset": PR.done = {}; PR.stepCount = 0; store("tasks", "{}"); renderExplain(); break;
-      // 手机竖屏：☰ 菜单、看大脑、操作区顶部一行、横屏提示
       case "menu-btn": var mn = $("menu"); mn.hidden = !mn.hidden; t.setAttribute("aria-expanded", mn.hidden ? "false" : "true"); break;
       case "menu-help": $("menu").hidden = true; openHelp(); break;
-      case "menu-restore": $("menu").hidden = true; net.restoreAll(); reanalyze(); toast("所有神经元已恢复"); practiceEvent("restore"); break;
+      case "menu-restore": $("menu").hidden = true; restoreAll(); break;
       case "menu-exit": $("menu").hidden = true; shutdown(); break;
-      case "btn-brain": setSheet(true); break;
-      case "brain-close": setSheet(false); break;
-      case "rot-ok": document.body.classList.add("rot-ok"); break;
-      case "tk-assist": P.assist = !P.assist; if (P.assist && P.env && !P.over) P.assistUsed = true; renderOpts(); setPlayView(); break;
-      case "b-mnext": playNewGame(); renderControls(); renderPills(); break;
     }
   }
 
   function onChange(e) {
     var t = e.target;
-    if (t.id === "ck-fog") { app.fog = t.checked; if (app.mode === "play") setPlayView(); else setWatchView(); practiceEvent("fog"); }
+    if (t.id === "ck-fog") { app.fog = t.checked; setWatchView(); }
     else if (t.id === "ck-auto") { app.autoNext = t.checked; }
-    else if (t.id === "ck-assist") { P.assist = t.checked; if (P.assist && P.env && !P.over) P.assistUsed = true; setPlayView(); }
+    else if (t.id === "ck-guard") { app.guard = t.checked; reanalyze(); }
     else if (t.id === "ck-big") { setBig(t.checked); }
   }
   function onInput(e) {
     var t = e.target;
     if (t.id === "rng-ms") {
-      var v = +t.value;
-      if (app.mode === "play") { P.ms = v; P.levelIdx = -1; $("ms-lab").textContent = v + " 毫秒/步"; document.querySelectorAll(".preset").forEach(function (b) { b.classList.remove("on"); }); if (P.started && !P.over && !P.paused) schedulePlay(); }
-      else { W.ms = v; W.speedIdx = -1; $("ms-lab").textContent = v + " 毫秒/步"; document.querySelectorAll(".preset").forEach(function (b) { b.classList.remove("on"); }); scheduleWatch(); }
+      W.ms = +t.value; W.speedIdx = -1; $("ms-lab").textContent = W.ms + " 毫秒/步";
+      document.querySelectorAll(".preset[data-kind=speed]").forEach(function (b) { b.classList.remove("on"); });
+      scheduleWatch();
     }
   }
 
@@ -1115,75 +868,58 @@
     return i >= 0 && i < info.C ? i : null;
   }
 
-  function bindCanvases() {
-    var fc = $("fc-canvas");
-    on(fc, "click", function (e) { var h = canvasHit(e, hits.fc); if (h) toggleKnock("fc1", h.j, h.top1); });
-    on(fc, "mousemove", function (e) {
+  function onBrainMove(e) {
+    var t = e.target;
+    if (!app.view || !app.view.res || !app.view.res.contrib) return;
+    var res = app.view.res, envName = ACT[res.envAction].name;
+    if (t.id === "fc-canvas") {
       var h = canvasHit(e, hits.fc);
-      if (!h || !app.view || !app.view.res) { hideTip(); fc.style.cursor = "default"; return; }
-      fc.style.cursor = "pointer";
-      var res = app.view.res;
-      showTipAt(e.clientX, e.clientY, "全连接层神经元 <b>#" + h.j + "</b>" + (net.isKnocked("fc1", h.j) ? "（已敲掉）" : "") +
-        "<br>激活 " + res.h[h.j].toFixed(3) + "<br>对“" + ACT[res.action].name + "”的贡献 " + fmt(res.contrib.fc1[h.j], 3) + "<br>点一下 = 敲掉 / 恢复" + DEMOS.click);
-    });
-    on(fc, "mouseleave", hideTip);
-    ["conv1", "conv2", "conv3"].forEach(function (layer) {
-      var cv = $("sq-" + layer);
-      on(cv, "click", function (e) { var i = sqHit(e, layer); if (i !== null) toggleKnock(layer, i, false); });
-      on(cv, "mousemove", function (e) {
-        var i = sqHit(e, layer);
-        if (i === null || !app.view || !app.view.res) return;
-        var res = app.view.res;
-        showTipAt(e.clientX, e.clientY, layer.replace("conv", "卷积层 ") + " 通道 <b>#" + i + "</b>" + (net.isKnocked(layer, i) ? "（已敲掉）" : "") +
-          "<br>对“" + ACT[res.action].name + "”的贡献 " + fmt(res.contrib[layer][i], 3) + "<br>点一下 = 敲掉 / 恢复");
-      });
-      on(cv, "mouseleave", hideTip);
-    });
-    // swipe on the board (phones / touchpads)
-    var bw = $("board-wrap"), start = null;
-    on(bw, "pointerdown", function (e) { start = [e.clientX, e.clientY]; });
-    on(bw, "pointerup", function (e) {
-      if (!start || app.mode !== "play") { start = null; return; }
-      var dx = e.clientX - start[0], dy = e.clientY - start[1];
-      start = null;
-      if (Math.max(Math.abs(dx), Math.abs(dy)) < 24) return;
-      playKey(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 3 : 2) : (dy > 0 ? 1 : 0));
-    });
+      if (!h) { hideTip(); t.style.cursor = "default"; return; }
+      t.style.cursor = "pointer";
+      var ln = t.dataset.layer;
+      showTipAt(e.clientX, e.clientY, "全连接层神经元 <b>#" + h.j + "</b>" + (app.net.isKnocked(ln, h.j) ? "（已敲掉）" : "") +
+        "<br>激活 " + res.acts[ln].a[h.j].toFixed(3) + "<br>对“" + envName + "”的贡献 " + fmt(res.contrib[ln][h.j], 3) + "<br>点一下 = 敲掉 / 恢复" + DEMOS.click);
+    } else if (t.classList && t.classList.contains("sq")) {
+      var layer = t.dataset.layer, i = sqHit(e, layer);
+      if (i === null) return;
+      var L = app.net.layer(layer);
+      showTipAt(e.clientX, e.clientY, (L.kind === "conv" ? "卷积层通道" : "全连接层神经元") + " <b>#" + i + "</b>" + (app.net.isKnocked(layer, i) ? "（已敲掉）" : "") +
+        "<br>对“" + envName + "”的贡献 " + fmt(res.contrib[layer][i], 3) + "<br>点一下 = 敲掉 / 恢复");
+    }
   }
 
   function renderFooter() {
     var c = CREDITS;
     $("foot").textContent = [(c.AUTHOR || "Shuyao Gao") + (c.AUTHOR_EMAIL ? "（" + c.AUTHOR_EMAIL + "）" : ""), c.UNIVERSITY_EN, c.UNIVERSITY_KO,
-      (c.SERIES_NAME ? c.SERIES_NAME + "系列" : ""), "代码 MIT · 文档 CC BY 4.0", "离线纯静态网页，关掉标签页即全部结束"]
+      (c.SERIES_NAME ? c.SERIES_NAME + "系列" : ""), "代码 MIT · 文档 CC BY 4.0 · 第三方模型见 THIRD_PARTY.md", "离线纯静态网页，关掉标签页即全部结束"]
       .filter(Boolean).join("  ·  ");
   }
 
   // ================================================================== self-test (used by tools/browser_check.py)
   function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   async function selftest() {
-    var out = { steps: [], ok: false };
+    var out = { steps: [], brains: {}, ok: false };
     function note(s) { out.steps.push(s); }
     try {
       closeHelp(); openHelp(); closeHelp(); note("help");
-      setMode("watch"); W.speedIdx = 3; W.ms = 5; renderOpts(); setWatchPlaying(true);
-      await wait(1500);
-      note("watch steps=" + W.totalSteps + " games=" + W.results.length);
-      if (W.totalSteps < 20) throw new Error("watch mode did not advance");
-      setWatchPlaying(false); manualStep(); manualStep(); manualStep(); note("manual steps");
-      toggleKnock("conv2", 0, false); toggleKnock("fc1", fcTop1(W.lastRes), true); toggleKnock("conv1", 3, false);
-      if (net.knockCount() !== 3) throw new Error("knock count");
-      manualStep(); net.restoreAll(); reanalyze(); practiceEvent("restore"); note("knock+restore");
+      for (var bi = 0; bi < BRAINS.length; bi++) {
+        var id = BRAINS[bi].id;
+        setBrain(id); W.speedIdx = 3; W.ms = 5; renderOpts(); setWatchPlaying(true);
+        await wait(1500);
+        out.brains[id] = { steps: W.totalSteps, n: app.N, games: curResults().length };
+        if (W.totalSteps < 10) throw new Error("brain " + id + " did not advance");
+        setWatchPlaying(false); manualStep(); manualStep(); manualStep();
+        var hid = app.net.hiddenLayers();
+        toggleKnock(hid[0].name, 0); toggleKnock(app.lastHidden.name, fcTop1(W.lastRes));
+        if (app.net.knockCount() !== 2) throw new Error("knock count " + id);
+        manualStep(); restoreAll();
+        if (!app.spec.mask || app.spec.mask !== "safe") { app.guard = !app.guard; reanalyze(); app.guard = !app.guard; reanalyze(); }
+        app.policy = app.policy === "greedy" ? "sample" : "greedy"; reanalyze(); app.policy = BRAINS[bi].policy; reanalyze();
+        W.totalSteps = 0;
+        note("brain " + id + " ok");
+      }
       setBig(true); await wait(50); setBig(false); note("big");
-      setMode("play");
-      for (var i = 0; i < 400 && !P.over; i++) playKey(i < 25 ? P.cur.action : P.env.direction);
-      note("play steps=" + P.log.length + " over=" + !!P.over);
-      if (!P.over) throw new Error("play game did not end");
-      var dis = P.log.filter(function (r) { return !r.agree; })[0];
-      if (dis) { P.replay = dis; setPlayView(); renderExplain(); P.replay = null; setPlayView(); note("replay"); }
-      $("ck-assist").click(); playNewGame(); playKey(P.cur.action); playKey(P.cur.action); note("assist");
-      P.levelIdx = 3; P.ms = CFG.playLevels[3].ms; renderOpts(); playNewGame(); playKey(3); await wait(800); note("timed steps=" + P.log.length);
-      setMode("practice"); manualStep(); note("practice");
-      setMode("watch");
+      setBrain(BRAINS[CFG.brainDefault].id);
       await wait(100);
       out.overflowX = document.documentElement.scrollWidth > window.innerWidth + 1;
       out.board = app.sizes.board; out.map = app.sizes.map;
@@ -1200,19 +936,15 @@
     document.title = "SELFTEST " + (out.ok && !out.errors.length ? "PASS" : "FAIL");
   }
 
-  /** ?shot=watch|play|practice&steps=N — deterministic state for screenshots. */
+  /** ?shot=watch|knock&brain=<id>&steps=N — deterministic state for screenshots. */
   function prepareShot(kind, steps) {
     closeHelp();
-    if (kind === "play") {
-      setMode("play");
-      for (var i = 0; i < steps; i++) playKey(i === steps - 1 ? (P.cur.action + (P.cur.legal[(P.cur.action + 2) % 4] ? 2 : 1)) % 4 : P.cur.action);
-    } else {
-      if (kind === "practice") setMode("practice");
-      setWatchPlaying(false);
-      for (var j = 0; j < steps; j++) { if (W.over) { hideBanner(); watchNextGame(); } watchStep(); }
-      if (kind === "knock") { toggleKnock("fc1", fcTop1(W.lastRes), true); toggleKnock("conv3", 5, false); }
-      $("toast").classList.remove("show");
-    }
+    if (params.get("brain")) setBrain(params.get("brain"));
+    setWatchPlaying(false);
+    for (var j = 0; j < steps; j++) { if (W.over) { hideBanner(); watchNextGame(); } watchStep(); }
+    if (!W.lastRes.contrib) reanalyze();
+    if (kind === "knock") { toggleKnock(app.lastHidden.name, fcTop1(W.lastRes)); var hid = app.net.hiddenLayers(); toggleKnock(hid[Math.min(2, hid.length - 1)].name, 5); }
+    $("toast").classList.remove("show");
     $("selftest").textContent = JSON.stringify({ sizes: app.sizes, rh: $("right").clientHeight, rw: $("right").clientWidth, mh: $("main").clientHeight });
   }
 
@@ -1221,32 +953,27 @@
     $("app-title").textContent = CFG.title;
     $("app-title-short").textContent = CFG.mobileTitle || CFG.shortTitle;
     document.title = CFG.title;
-    renderFormula();
-    buildInputRow();
-    ["conv1", "conv2", "conv3"].forEach(buildTops);
     renderFooter();
     bindTips(document);
-    bindCanvases();
     on(document, "keydown", onKey);
     on(document, "click", onClick);
     on(document, "change", onChange);
     on(document, "input", onInput);
+    on($("brain-body"), "mousemove", onBrainMove);
+    on($("brain-body"), "mouseleave", hideTip);
     on(window, "resize", function () { detectTouch(); layout(); });
     on(window, "orientationchange", function () { setTimeout(function () { if (app.alive) { detectTouch(); layout(); } }, 150); });
-    app.touchCtl = new window.SnakeTouch($("touchctl"), { onDir: function (d) { playKey(d); }, onPress: onTouchPress });
     var big = store("big") === "1";
     if (big) { document.body.classList.add("big"); $("ck-big").checked = true; }
     detectTouch();
-    watchRestart();
-    setMode("watch");
-    layout();
+    var want = params.get("brain") || store("brain");
+    setBrain(brainById(want) ? want : BRAINS[CFG.brainDefault].id);
     // 只读的调试 / 验收入口（tools/browser_check.py 的手机场景断言用）
     window.__app = {
-      mode: function () { return app.mode; }, touchp: function () { return app.touchp; }, sheet: function () { return app.sheet; },
-      playDir: function () { return P.env ? P.env.direction : null; }, playSteps: function () { return P.env ? P.env.steps : null; },
-      playMs: function () { return P.ms; }, playLevel: function () { return P.levelIdx; },
-      watchSteps: function () { return W.totalSteps; }, knocked: function () { return net ? net.knockCount() : 0; },
-      sizes: function () { return app.sizes; }, kConv: function () { return app.kConv; }
+      brain: function () { return app.brain.id; }, n: function () { return app.N; }, touchp: function () { return app.touchp; },
+      watchSteps: function () { return W.totalSteps; }, knocked: function () { return app.net ? app.net.knockCount() : 0; },
+      sizes: function () { return app.sizes; }, kConv: function () { return app.kConv; }, playing: function () { return W.playing; },
+      guard: function () { return app.guard; }, policy: function () { return app.policy; }, brains: function () { return BRAINS.map(function (b) { return b.id; }); }
     };
     var shot = params.get("shot");
     if (params.get("selftest")) { closeHelp(); selftest(); return; }

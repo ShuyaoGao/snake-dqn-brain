@@ -1,5 +1,26 @@
 # 第三方组件与来源说明 / Third-party notices
 
+## 第三方模型权重（随本仓库分发，已转成 float16 放在 `play/model/`）
+
+页面里能切换的 4 个大脑中，3 个来自别人公开训练好的模型。我们**没有重新训练**，只把权重从 Stable-Baselines3 的 `policy.pth` 转成 float16 的 JavaScript 文件（`tools/export_sb3.py`，不依赖 PyTorch），并在浏览器里用纯 JavaScript 重写了前向计算；观测编码（网络“看到”的图）按原项目的代码逐行复现，`tests/test_play_parity.py` 锁住它们与 NumPy 实现（`brains.py`）逐位一致。
+
+| 页面上的名字 | 来源项目 | 原文件 | 许可证 | 算法 / 结构 | 原作者的说明 |
+|---|---|---|---|---|---|
+| PPO 卷积网 A | [linyiLYi/snake-ai](https://github.com/linyiLYi/snake-ai)（提交 856da0b，2023-05-19） | `main/trained_models_cnn/ppo_snake_final.zip` → `policy.pth` | **Apache-2.0**（原仓库 `LICENSE`） | MaskablePPO（sb3-contrib，Stable-Baselines3 1.8.0）+ CnnPolicy（Nature DQN 结构：8×8/4 → 4×4/2 → 3×3/1 → 512） | 12×12 棋盘，观测 84×84×3 图像；训练时带“不撞死、不掉头”的动作掩码；README 未给出数字成绩 |
+| PPO 全连接网 | 同上 | `main/trained_models_mlp/ppo_snake_final.zip` | Apache-2.0 | MaskablePPO + MlpPolicy（64-64） | 观测 12×12 数表；README 说卷积版平均分更高 |
+| PPO 卷积网 B | [Part-time-Ray/AI-Snake-Game](https://github.com/Part-time-Ray/AI-Snake-Game)（提交 a5d16a8，2024-05-21） | `model/model.zip` → `policy.pth` | **MIT**（原仓库 `LICENSE`，Copyright (c) 2024 Part-time-Ray） | PPO（Stable-Baselines3 2.3.2）+ CnnPolicy（同上结构） | 12×12 棋盘，观测 60×60×3 图像（图像按 [列][行] 索引，即转置）；无动作掩码；README：5000 万步后平均长度 74，1 亿步后 98 |
+
+- 两个项目都只取了**权重文件**，没有复制它们的代码；观测编码和动作掩码是按它们的 `snake_game_custom_wrapper_cnn.py` / `snake_game_custom_wrapper_mlp.py` / `wrapper.py` 的逻辑用 JavaScript 和 NumPy 重新实现的（`play/js/snake_env.js`、`brains.py`）。
+- Apache-2.0 要求保留版权与许可声明：原项目的许可证文本见 `LICENSES/Apache-2.0-linyiLYi-snake-ai.txt`；MIT 许可证文本见 `LICENSES/MIT-Part-time-Ray-AI-Snake-Game.txt`。
+- 页面上的“护栏”开关（只在不会立刻撞死的方向里选）是本仓库加在模型外面的规则，**不是原模型的一部分**；关掉就是原模型本来的行为。README 里两种成绩都写了。
+- 下载时的 SHA-256 在 `results/brains.json` 的 `source` 字段旁没有记录（权重已转成 float16，无法逐字节对回原文件）；要核对，请按上表的提交号从原仓库取原文件，用 `tools/export_sb3.py` 重新导出，和 `play/model/` 里的文件比较。
+
+## 本仓库自己训练的模型
+
+| 内容 | 说明 |
+|---|---|
+| `play/model/snake_cnn_fp16.js`（页面上的「Double DQN（本仓库）」） | 由本仓库的 `checkpoints/dqn_snake_best.pt` 转成 float16 导出（`tools/export_model.py`），作者自己用本仓库 `train.py` 训练，许可证同代码（MIT） |
+
 ## 网页 play/（下载后双击即玩的部分）
 
 | 内容 | 说明 |
@@ -8,23 +29,22 @@
 | 字体 | **不内嵌任何字体**。只按名字引用操作系统自带字体：Windows 为 Microsoft YaHei，macOS 为 PingFang SC，其余回退到 `system-ui`。字体文件本身不随本仓库分发 |
 | 表情符号（🐍 等） | Unicode 字符，由操作系统的表情字体显示，不随本仓库分发 |
 | 图片、音效 | 没有。棋盘、动画演示都由代码实时绘制；页面没有声音 |
-| 模型权重 `play/model/snake_cnn_fp16.js` | 由本仓库的 `checkpoints/dqn_snake_best.pt` 转成 float16 导出（`tools/export_model.py`），作者自己用本仓库 `train.py` 训练，许可证同代码（MIT） |
-| 网络请求 | 没有。不用 CDN、不用 fetch / XHR、不用 service worker，`file://` 下即可运行 |
+| 网络请求 | 没有。不用 CDN、不用 fetch / XHR、不用 service worker，`file://` 下即可运行。`config.js` 里原项目的 GitHub 地址只用来署名，页面不会访问它们 |
 
 ## Python（只在想自己训练 / 评估 / 跑测试时需要，不随仓库分发）
 
 | 包 | 用途 | 许可证（来自 PyPI 元数据） |
 |---|---|---|
-| PyTorch (`torch`) | 训练与评估 | BSD-3-Clause 风格（PyTorch 的 LICENSE）；wheel 元数据还列出所含组件的 Apache-2.0、BSD-2-Clause、BSL-1.0、MIT 等 |
-| NumPy (`numpy`) | 环境状态、经验回放 | BSD-3-Clause（另含 0BSD、MIT、Zlib、CC0-1.0 组件） |
+| NumPy (`numpy`) | 环境状态、`brains.py` 参考实现、评估 | BSD-3-Clause（另含 0BSD、MIT、Zlib、CC0-1.0 组件） |
+| PyTorch (`torch`) | 只有训练 Double DQN（`train.py`）和导出它（`tools/export_model.py`）需要；三个 PPO 大脑的导出和评估不需要 | BSD-3-Clause 风格（PyTorch 的 LICENSE） |
 | pytest | 测试 | MIT |
 
 ## 测试工具（不随仓库分发）
 
 | 工具 | 用途 |
 |---|---|
-| Node.js | `tests/js/harness.js`：在 Node 里运行 `play/js/*.js`，与 Python / PyTorch 逐项比对 |
-| 本机已安装的 Microsoft Edge 或 Google Chrome | `tools/browser_check.py`：无头打开页面跑自检和截图；不下载任何浏览器 |
+| Node.js | `tests/js/harness.js`：在 Node 里运行 `play/js/*.js`，与 NumPy 逐项比对 |
+| 本机已安装的 Microsoft Edge 或 Google Chrome（+ `pip install playwright`） | `tools/browser_check.py`：无头打开页面跑自检、手机尺寸场景和截图；不下载任何浏览器 |
 
 ## 文本
 
@@ -32,12 +52,13 @@
 
 ## 代码来源
 
-- 全部代码为作者原创（由 Claude Code 辅助编写，经作者审阅），没有从外部项目复制代码。
+- 本仓库的代码为作者原创（由 Claude Code 辅助编写，经作者审阅），没有从外部项目复制代码；第三方模型权重的来源和许可见上表。
 - `play/js/pyrandom.js` 按公开的 MT19937 算法（Matsumoto & Nishimura, 1998）和 CPython `random` 模块的行为
   重新实现，用于在浏览器里复现与 Python 相同的随机序列；没有复制 CPython 源代码。
 - 算法思想参考（只用了思想，未复制代码）：
-  - V. Mnih et al., "Human-level control through deep reinforcement learning", *Nature* 518, 529–533 (2015) — DQN、经验回放、目标网络。
+  - V. Mnih et al., "Human-level control through deep reinforcement learning", *Nature* 518, 529–533 (2015) — DQN、经验回放、目标网络，以及两个 PPO 大脑用的卷积结构（“Nature CNN”）。
   - H. van Hasselt, A. Guez, D. Silver, "Deep Reinforcement Learning with Double Q-learning", AAAI 2016 — Double DQN。
+  - J. Schulman et al., "Proximal Policy Optimization Algorithms", 2017 — PPO。
   - K. Simonyan, A. Vedaldi, A. Zisserman, "Deep Inside Convolutional Networks: Visualising Image Classification Models and Saliency Maps", 2013 — 梯度显著性图（“注意力红雾”）。
 
 ## 名称与商标

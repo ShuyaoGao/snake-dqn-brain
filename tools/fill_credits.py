@@ -43,6 +43,30 @@ def numbers_from_results():
     }
 
 
+def numbers_from_brains():
+    """{{B_<ID>_<FIELD>}} placeholders from results/brains.json (the four brains of the page)."""
+    p = ROOT / "results" / "brains.json"
+    if not p.exists():
+        return {}
+    r = json.loads(p.read_text(encoding="utf-8"))
+    g = lambda v: f"{v:g}" if abs(v - round(v, 2)) < 1e-9 else f"{v:.2f}"  # noqa: E731
+    out = {"B_GAMES": str(r["games"]), "B_SEED": str(r["seed"])}
+    for bid, d in r["brains"].items():
+        key = bid.upper()
+        out[f"B_{key}_PARAMS"] = f"{d['params']:,}"
+        out[f"B_{key}_N"] = str(d["n"])
+        for label, e in d["eval"].items():
+            lk = f"B_{key}_{label.upper()}"
+            out[f"{lk}_AVG"] = g(e["avg_score"])
+            out[f"{lk}_MAX"] = str(e["max_score"])
+            out[f"{lk}_MIN"] = str(e["min_score"])
+            out[f"{lk}_STEPS"] = f"{e['avg_steps']:.0f}"
+            out[f"{lk}_LEN"] = f"{e['avg_length']:.1f}"
+            out[f"{lk}_POLICY"] = "按概率抽样" if e["policy"] == "sample" else "最大分"
+            out[f"{lk}_GUARD"] = {"safe": "护栏开", "trained": "模型自带掩码", "none": "无", "turn": "只禁掉头"}[e["guard"]]
+    return out
+
+
 def render(values):
     written = []
     for tpl in sorted(TEMPLATES.glob("*.tmpl")):
@@ -80,6 +104,7 @@ def main(argv=None):
     credits = json.loads((ROOT / "credits.json").read_text(encoding="utf-8"))
     values = {k: v for k, v in credits.items() if not k.startswith("_")}
     values.update(numbers_from_results())
+    values.update(numbers_from_brains())
     for p in render(values):
         print("wrote", p.relative_to(ROOT).as_posix())
     from tools import build

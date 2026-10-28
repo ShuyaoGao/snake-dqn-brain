@@ -6,8 +6,8 @@ Same as: python -m tools.browser_check --mobile
 
 Desktop: headless self-test at 1920x1080 and 1366x768 + the exit button.
 Mobile: Playwright (channel msedge) emulates 390x844 / 414x896 / 360x780 / 768x1024 with touch and the two
-desktop sizes, and runs the scenario assertions in tools/browser_check.py (joystick drag changes the snake's
-direction, no page scroll in 我来玩, brain sheet opens / closes, no overflow, no JS errors).
+desktop sizes, and runs the scenario assertions in tools/browser_check.py (brain panel below the board on phones,
+knock-out / restore, switching all four brains, guard and policy switches, no overflow, no JS errors).
 """
 import os
 import sys

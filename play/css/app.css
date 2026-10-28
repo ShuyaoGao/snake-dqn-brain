@@ -51,10 +51,8 @@ button { font: inherit; cursor: pointer; }
 #banner { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
           justify-content: center; gap: 8px; background: rgba(0,0,0,.62); border-radius: 10px; text-align: center;
           padding: 16px; font-size: 14px; line-height: 1.6; }
-#banner[hidden], #board-hint[hidden] { display: none; }
+#banner[hidden] { display: none; }
 #banner .big { font-size: 22px; font-weight: bold; color: #ff8a80; }
-#board-hint { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); background: rgba(20,28,38,.92);
-              border: 1px solid var(--accent); border-radius: 10px; padding: 6px 14px; font-size: 13.5px; white-space: nowrap; }
 
 /* ---------- options / controls ---------- */
 .opt-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin: 3px 0; }
@@ -73,26 +71,10 @@ input[type=range] { width: 140px; cursor: pointer; }
 #explain { font-size: 12.5px; line-height: 1.7; color: #c3cdd9; flex: 1 1 auto; min-height: 70px; overflow-y: auto; }
 #explain p + p { margin-top: 4px; }
 #explain b { color: var(--text); }
-.hl-you { color: var(--you); font-weight: bold; }
-.hl-dqn { color: var(--dqn); font-weight: bold; }
 table.hist { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; }
 table.hist th, table.hist td { border-bottom: 1px solid var(--line); padding: 3px 4px; text-align: center; }
 table.hist th { color: var(--muted); font-weight: normal; }
-.chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
-.chip { border: 1px solid #3a4a60; background: #1b2430; color: var(--text); border-radius: 999px; padding: 2px 10px; font-size: 12px; }
-.chip.fatal { border-color: var(--danger); color: #ffb3b3; }
-.chip.on { border-color: var(--accent); color: var(--accent); }
 
-/* practice checklist */
-.tasks { list-style: none; margin-top: 4px; }
-.tasks li { display: flex; gap: 8px; align-items: flex-start; padding: 4px 6px; border-radius: 8px; }
-.tasks li .box { flex: none; width: 18px; height: 18px; border-radius: 5px; border: 2px solid #4a5a70; margin-top: 2px;
-                 display: flex; align-items: center; justify-content: center; font-size: 12px; color: #fff; }
-.tasks li.done .box { background: var(--green); border-color: var(--green); }
-.tasks li.done { color: var(--muted); }
-.tasks li.cur { background: #1f2a1f; outline: 1px solid #355a35; }
-.progress { height: 6px; background: #0c1117; border-radius: 3px; overflow: hidden; margin: 4px 0; }
-.progress i { display: block; height: 100%; background: var(--green); transition: width .3s; }
 
 /* ---------- brain ---------- */
 .brain { position: relative; display: flex; flex-direction: column; gap: 4px; min-height: 100%; }
@@ -132,9 +114,6 @@ table.hist th { color: var(--muted); font-weight: normal; }
 #value-text { cursor: help; }
 #value-text b { color: var(--text); font-size: 13px; }
 #value-curve { flex: none; width: 110px; height: 22px; }
-#brain-cover { position: absolute; inset: 0; background: rgba(15,20,27,.88); border-radius: 12px; display: flex;
-               align-items: center; justify-content: center; text-align: center; padding: 30px; font-size: 15px; line-height: 1.8; }
-#brain-cover[hidden] { display: none; }
 
 /* ---------- footer ---------- */
 #foot { flex: none; padding: 4px 14px; font-size: 11.5px; color: var(--muted); background: #0c1117;
@@ -214,13 +193,26 @@ kbd { display: inline-block; min-width: 22px; padding: 1px 6px; border: 1px soli
 #left > .card { flex: none; }
 #left > #explain { flex: 1 1 auto; }
 
+/* ---------- extras: brain picker, results table, help demo ---------- */
+.src { font-size: 11.5px; color: var(--muted); margin: 2px 0 4px; line-height: 1.5; }
+.src a { color: var(--neg); text-decoration: none; }
+.src a:hover { text-decoration: underline; }
+table.hist { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; }
+table.hist th, table.hist td { border-bottom: 1px solid var(--line); padding: 3px 4px; text-align: center; }
+table.hist th { color: var(--muted); font-weight: normal; }
+table.hist tr.cur td { color: var(--accent); }
+.sq.fcgrid { display: block; }
+.demo-brains .d-pill { position: absolute; top: 30px; width: 34px; height: 24px; border-radius: 12px; border: 1px solid #34425a; background: #1d2633;
+                       color: var(--text); font-style: normal; text-align: center; line-height: 22px; font-size: 13px; font-weight: bold; }
+.demo-brains .p1 { left: 18px; animation: d-pill 3.2s infinite 0s; } .demo-brains .p2 { left: 62px; animation: d-pill 3.2s infinite .8s; }
+.demo-brains .p3 { left: 106px; animation: d-pill 3.2s infinite 1.6s; } .demo-brains .p4 { left: 150px; animation: d-pill 3.2s infinite 2.4s; }
+@keyframes d-pill { 0%, 20% { border-color: var(--accent); color: var(--accent); background: #2a2a1c; } 25%, 100% { border-color: #34425a; color: var(--text); background: #1d2633; } }
+
 /* ==================================================================================
-   手机竖屏（触屏 + 宽度 ≤ 980px + 竖屏 → app.js 给 body 加 .touchp；横屏触屏加 .touchl）
-   观战 / 练习：整页上下滚动，棋盘贴顶按宽度缩放，大脑面板在下方用紧凑画法。
-   我来玩：100dvh 一屏不滚动，上方棋盘、下方操作区（浮动摇杆 + 大圆键）；大脑默认收起，「看大脑」全屏展开。
+   手机竖屏（触屏 + 宽度 ≤ 980px + 竖屏 → app.js 给 body 加 .touchp）
+   只有观看模式：整页上下滚动，棋盘贴顶按宽度缩放，大脑面板在下方用紧凑画法。
    ================================================================================== */
-#menu-btn, #menu, #touchctl, #brain-close, #rotate-hint, #app-title-short { display: none; }
-#rotate-hint[hidden] { display: none; }
+#menu-btn, #menu, #app-title-short { display: none; }
 body.touchp { height: auto; min-height: 100%; overflow: auto; display: block; touch-action: manipulation;
               -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
               padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left); }
@@ -229,8 +221,6 @@ body.touchp #top { gap: 6px; padding: 5px 8px; min-height: 42px; position: relat
 body.touchp .brand { font-size: 15px; }
 body.touchp .brand .logo, body.touchp #app-title { display: none; }
 body.touchp #app-title-short { display: inline; }
-body.touchp #tabs { margin-left: 2px; gap: 2px; padding: 2px; }
-body.touchp .tab { padding: 6px 8px; font-size: 13px; }
 body.touchp .switch, body.touchp #btn-help, body.touchp #btn-exit { display: none; }
 body.touchp #menu-btn { display: block; margin-left: auto; font: inherit; font-size: 18px; width: 38px; height: 34px; background: #1e2834; color: var(--text);
                         border: 1px solid #3a4a60; border-radius: 8px; }
@@ -243,12 +233,10 @@ body.touchp #main { display: flex; flex-direction: column; gap: 8px; padding: 6p
 body.touchp #left, body.touchp #right { overflow: visible; }
 body.touchp .card { padding: 8px; }
 body.touchp .pill { font-size: 12px; padding: 2px 9px; }
-body.touchp.m-play .pills { flex-wrap: nowrap; overflow: hidden; gap: 4px; }
-body.touchp.m-play .pill { font-size: 11px; padding: 2px 6px; }
-body.touchp #board-hint { white-space: normal; max-width: 92%; text-align: center; line-height: 1.5; }
 body.touchp #opts .preset, body.touchp #controls .btn { min-height: 40px; padding: 8px 12px; font-size: 14px; }
 body.touchp input[type=range] { width: 120px; height: 28px; }
 body.touchp .ck { min-height: 36px; font-size: 14px; }
+body.touchp table.hist { display: block; overflow-x: auto; white-space: nowrap; }
 body.touchp #foot { white-space: normal; font-size: 11px; line-height: 1.6; padding: 6px 10px calc(6px + env(safe-area-inset-bottom)); }
 /* 大脑面板紧凑画法 */
 body.touchp .brain { min-height: 0; }
@@ -263,65 +251,9 @@ body.touchp .in-map { flex: 0 1 calc(20% - 5px); min-width: 0; font-size: 11px; 
 body.touchp .in-map canvas { max-width: 100%; }
 body.touchp .in-map .nm { white-space: normal; line-height: 1.25; }
 body.touchp .in-map .dims { font-size: 10px; }
-/* 我来玩：一屏 */
-html.touchp-play, body.touchp.m-play { height: 100vh; height: 100dvh; overflow: hidden; }
-body.touchp.m-play { display: flex; flex-direction: column; }
-body.touchp.m-play #top { flex: none; }
-body.touchp.m-play #main { flex: 1 1 auto; min-height: 0; padding-bottom: 0; }
-body.touchp.m-play #left { flex: 1 1 auto; min-height: 0; overflow: hidden; gap: 6px; }
-body.touchp.m-play .board-card { flex: none; }
-body.touchp.m-play #opts, body.touchp.m-play #controls, body.touchp.m-play #explain, body.touchp.m-play #foot { display: none; }
-body.touchp.m-play #right { display: none; }
-body.touchp.m-play #touchctl { display: grid; }
-#touchctl { flex: none; height: 36vh; height: 36dvh; min-height: 220px; position: relative; grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr; gap: 6px;
-            padding-bottom: env(safe-area-inset-bottom); touch-action: none; -webkit-user-select: none; user-select: none; }
-#mob-bar { grid-column: 1 / 3; display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; overflow: hidden; }
-#mob-levels { display: flex; gap: 0; flex: 1 1 auto; min-width: 0; overflow: hidden; }
-#mob-levels .preset { flex: 1 1 0; min-width: 0; padding: 7px 2px; font-size: 12.5px; border-radius: 0; white-space: nowrap; min-height: 36px; }
-#mob-levels .preset:first-child { border-radius: 8px 0 0 8px; } #mob-levels .preset:last-child { border-radius: 0 8px 8px 0; }
-#mob-bar > button { flex: none; font: inherit; font-size: 13px; font-weight: bold; min-height: 36px; padding: 6px 10px; border-radius: 16px;
-                    border: 1px solid #3a4a60; background: #1d2633; color: var(--text); }
-#btn-brain { border-color: var(--accent); color: var(--accent); }
-#tk-assist.on { background: #2a2a1c; border-color: var(--accent); color: var(--accent); }
-#stick-zone { position: relative; border: 1px dashed #2c3a4e; border-radius: 12px; touch-action: none; overflow: hidden;
-              background: radial-gradient(circle at 50% 60%, rgba(79,195,247,.08), transparent 70%); }
-#stick-zone .hint { position: absolute; left: 8px; top: 6px; font-size: 11px; color: var(--muted); pointer-events: none; }
-#stick-base { position: absolute; left: 50%; top: 56%; width: 120px; height: 120px; margin: -60px 0 0 -60px; border-radius: 50%;
-              border: 2px solid #3a4a60; background: rgba(30,40,52,.6); pointer-events: none; transition: opacity .15s; opacity: .75; }
-#stick-base.live { opacity: 1; border-color: var(--dqn); }
-#stick-base::before { content: "↑"; position: absolute; left: 50%; top: 4px; transform: translateX(-50%); color: var(--muted); font-size: 12px; }
-#stick-base::after { content: "↓"; position: absolute; left: 50%; bottom: 4px; transform: translateX(-50%); color: var(--muted); font-size: 12px; }
-#stick-knob { position: absolute; left: 50%; top: 50%; width: 52px; height: 52px; margin: -26px 0 0 -26px; border-radius: 50%;
-              background: radial-gradient(circle at 35% 35%, #9ce3ff, #2a8fc7); box-shadow: 0 0 0 3px rgba(79,195,247,.25); }
-#touchctl[data-dir="0"] #stick-base::before, #touchctl[data-dir="1"] #stick-base::after { color: var(--accent); }
-#btn-zone { position: relative; touch-action: none; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
-.tbtn { border-radius: 50%; border: 2px solid #3a4a60; background: #232d3a; color: var(--text); font: inherit; font-weight: bold;
-        display: grid; place-items: center; line-height: 1.2; touch-action: none; -webkit-tap-highlight-color: transparent; transition: transform .06s, background .06s; }
-.tbtn.on { transform: scale(.92); background: #3a4a60; border-color: var(--accent); }
-.tbtn.tbig { width: 96px; height: 96px; font-size: 20px; }
-.tbtn.tbig.go { background: #1f5c3a; border-color: var(--green); }
-.tbtn-hint { font-size: 11.5px; color: var(--muted); text-align: center; max-width: 150px; line-height: 1.4; }
-/* 「看大脑」：盖在整页上的全屏面板 */
-body.touchp.m-play.sheet-brain #right { display: block; position: fixed; z-index: 45; left: 0; right: 0; top: 0; bottom: 0; overflow: auto; background: var(--bg);
-                                        padding: calc(env(safe-area-inset-top) + 8px) 8px calc(env(safe-area-inset-bottom) + 64px); }
-body.touchp.m-play.sheet-brain #brain-close { display: block; position: fixed; z-index: 46; right: 12px; bottom: calc(env(safe-area-inset-bottom) + 12px);
-                                              font: inherit; font-size: 15px; font-weight: bold; min-height: 44px; padding: 10px 20px; background: var(--accent); color: #1a1400; border: none; border-radius: 22px; }
-/* 横屏的触屏手机：提示竖屏体验更好，可以选择继续（继续时用电脑布局，在棋盘上滑动） */
-body.touchl.m-play:not(.rot-ok) #rotate-hint:not([hidden]) { display: grid; position: fixed; inset: 0; z-index: 70; place-items: center; text-align: center;
-                                                           background: rgba(10,14,20,.94); padding: 16px; font-size: 15px; line-height: 1.7; }
-#rotate-hint b { font-size: 20px; display: block; margin-bottom: 8px; color: var(--accent); }
-#rotate-hint button { margin-top: 14px; font: inherit; min-height: 44px; padding: 8px 18px; background: transparent; color: var(--text); border: 1px solid #3a4a60; border-radius: 8px; }
-/* 说明浮层在手机上：全屏、内容可滚动、「开始」固定在底部；触屏图解 */
+/* 说明浮层在手机上：全屏、内容可滚动、「开始」固定在底部 */
 body.touchp .modal { align-items: stretch; }
 body.touchp .modal-box { width: 100%; max-height: none; border-radius: 0; border: none; padding: calc(env(safe-area-inset-top) + 14px) 14px calc(env(safe-area-inset-bottom) + 10px); }
 body.touchp .help-cards { grid-template-columns: 1fr; gap: 10px; }
 body.touchp .help-actions { padding-top: 10px; }
 body.touchp .big-btn { width: 100%; min-height: 48px; }
-.demo-stick svg { display: block; }
-.st-knob, .st-finger { animation: st-move 3.2s infinite; }
-.st-snake { animation: st-snake 3.2s infinite; }
-@keyframes st-move { 0%, 8% { transform: translate(0, 0); } 15%, 30% { transform: translate(14px, 0); } 38%, 55% { transform: translate(0, -14px); }
-                     63%, 80% { transform: translate(-14px, 0); } 88%, 100% { transform: translate(0, 0); } }
-@keyframes st-snake { 0%, 8% { transform: translate(0, 0); } 15%, 30% { transform: translate(10px, 0); } 38%, 55% { transform: translate(10px, -10px); }
-                      63%, 80% { transform: translate(-4px, -10px); } 88%, 100% { transform: translate(0, 0); } }
-@media (prefers-reduced-motion: reduce) { .st-knob, .st-finger, .st-snake { animation: none; } }
