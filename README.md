@@ -1,0 +1,187 @@
+> **AI 教学演示案例 / AI Teaching Demos** 系列
+
+# 贪吃蛇 · 看懂 AI 的大脑
+
+**Shuyao Gao**（gaoshuyao.mk@gmail.com）· aSSIST University (Seoul School of Integrated Sciences and Technologies) · 서울과학종합대학원대학교
+代码 MIT · 文档与教学素材 CC BY 4.0
+
+一个卷积神经网络用 Double DQN 学会了玩 10×10 的贪吃蛇。打开网页，你能实时看到它**在看哪里、每一层在想什么、为什么往这边拐**，还能亲手“敲掉”它的神经元，或者和它在同一局里比一比。手机、电脑都能直接用，不用安装、不用联网。
+
+**English summary.** *Snake · Inside the AI's brain* is a browser-only teaching demo. A small convolutional network (1,696,580 parameters), trained with Double DQN in PyTorch, plays Snake on a 10×10 grid; the page runs the real float16 weights in plain JavaScript and shows a live brain panel (input planes, the most influential convolutional channels, the fully connected layer, Q values and their contributions, plus a gradient saliency overlay). You can knock out neurons, play the same game against the DQN and replay the moves where you disagreed, or follow a guided practice checklist. Works on phones (portrait layout with a floating joystick) and desktops, online or from a downloaded zip. UI and documentation are in Chinese.
+
+![观战模式：左边是蛇，右边是网络的实时“大脑”](docs/img/watch_1920x1080.png)
+
+## 怎么打开（不用安装，也不用联网）
+
+- **手机**：点在线链接 <https://ShuyaoGao.github.io/snake-dqn-brain/>（竖屏打开）。
+- **电脑**：点在线链接 <https://ShuyaoGao.github.io/snake-dqn-brain/>；或在 [Releases](https://github.com/ShuyaoGao/snake-dqn-brain/releases) 下载 `snake-dqn-brain-v1.0.zip`，**解压后**双击 `index.html`；或仓库首页 **Code → Download ZIP**，解压后双击 `play/index.html`。
+
+Windows 用自带的 Edge 打开，Mac 用 Safari 打开。**一定要先解压**，不要在压缩包里直接双击。
+
+## 怎么用
+
+页面顶部有三个模式标签，打开时默认是「观战」：
+
+| 模式 | 你能做什么 |
+|---|---|
+| **观战** | AI 自己玩。速度有 4 档（慢放讲解 / 正常 / 快 / 极速），也可以用滑块细调；「单步」一步一步看 |
+| **我来玩** | 你和 DQN 玩**同一局**（同样的起点和食物）。每走一步就揭晓 DQN 在同一局面会怎么走：黄色实线是你，蓝色虚线是 DQN。难度 4 档：回合制 / 慢 / 正常 / 快 |
+| **练习** | 7 项任务清单，跟着做一遍就会读这个网络的“大脑”，完成一项自动打勾 |
+
+**电脑（键盘 / 鼠标）**：左边是棋盘和选项，右边是大脑面板。「我来玩」用方向键或 WASD 控制蛇；鼠标点大脑里任何一个方块或圆点就能“敲掉”这个神经元。
+
+| 按键 | 作用 |
+|---|---|
+| 方向键 / WASD | 我来玩：控制蛇 |
+| 空格 | 播放 / 暂停 |
+| → 或 . | 观战：单步 |
+| R | 重开 |
+| 1 / 2 / 3 | 切换到观战 / 我来玩 / 练习 |
+| B | 大屏模式（左右比例 45:55 → 35:65，适合投影） |
+| H 或右上角 ? | 再看一次操作说明 |
+
+**手机（竖屏触屏）**：上面是棋盘，往下滑是大脑面板（紧凑画法），点方块、圆点一样能敲掉神经元。点「我来玩」后整页一屏不滚动：上方棋盘，下方操作区——**左手在左半边任意处按住拖动摇杆**（上下左右），**右手的大圆键是暂停 / 继续**（回合制下是「直走一步」，本局结束后是「下一局」）；也可以直接在棋盘上滑动。「看大脑」全屏打开大脑面板，「返回游戏」关闭；☰ 菜单里有操作说明、全部恢复和退出。横屏时会提示竖屏体验更好。
+
+![手机竖屏「我来玩」：上方棋盘，下方浮动摇杆和大圆键（390×844）](docs/img/mobile_play_390x844.png)
+
+右边（手机上是下方）的**大脑面板**全部来自真实权重，在浏览器里实时计算：
+
+- 顶部结构式：`输入 5×10×10 → 卷积 32 → 卷积 64 → 卷积 64 → 全连接 256 → 输出 4 个方向的 Q 值`，以及参数个数。
+- **输入层**：网络“看到”的 5 张 10×10 图（蛇头、身体、食物、方向·上下、方向·左右），每张下面是归因条（梯度 × 输入）。
+- **三个卷积层**：展开对这一步决策贡献最大的 6 个通道（手机上 4 个）；右侧方阵是这一层的全部通道。
+- **全连接层**：256 个神经元的方阵，加上贡献最大的 24 个圆点，连线粗细表示它们对各方向 Q 值的贡献。
+- **输出**：4 个方向的 Q 值（“往这边走，以后大概还能拿到多少奖励”），绿色是实际选择；180° 掉头不允许，显示为灰色。
+- **局面价值估计**：合法方向里最大的 Q 值，以及这一局的变化曲线。
+
+**点任何一个方块或圆点，就能“敲掉”这个神经元**（让它的输出变成 0），看蛇会不会变笨；「全部恢复」一键复原。归因和贡献是模型内部的相关性解释，不代表因果。
+
+![我来玩：黄色实线是你，蓝色虚线是 DQN](docs/img/play_1920x1080.png)
+
+## 课堂上怎么用（推荐顺序，约 20 分钟）
+
+1. **观战 · 慢放讲解（5 分钟）**：先讲输入，蛇在网络眼里就是 5 张 10×10 的图；再讲输出，4 个 Q 值，选最大的那个。
+2. **单步 + 注意力红雾（3 分钟）**：暂停，一步一步走。红雾是 |∂Q/∂输入|，网络做这次决定时最“在意”哪些格子，通常是蛇头周围、食物方向和可能撞上的身体。
+3. **敲掉神经元（5 分钟）**：敲掉全连接层贡献最大的那个神经元，看 Q 值怎么变；再连续敲掉几个卷积通道，切到“极速”看平均分掉多少，最后「全部恢复」。可以顺便讨论：这个网络 96.6% 的参数都在全连接层。
+4. **我来玩 · 回合制（5 分钟）**：请同学上台和 DQN 比同一局。结束后点开“你 ≠ DQN”的时刻回放，讨论 DQN 为什么那样走。
+5. **练习**：课后自己把 7 项任务做完（手机上也能做）。
+
+讨论题：
+
+1. **Q 值是什么？** 同一局面，DQN 给“右”打的分比“左”高，意思是“往右走，以后（打折后）还能拿到的奖励更多”。为什么 Q 值是对**未来**的估计，而不是“这一步能不能吃到食物”？找一个“你去吃眼前的食物，DQN 却绕开”的时刻，想想它可能看到了什么。
+2. **敲掉多少才会变笨？** 先敲掉一个神经元，看蛇还能不能照样玩；再一个个多敲几个，用“极速”看平均分怎么变。想一想：网络里的“知识”是存在某一个神经元里，还是分散在很多神经元里？
+3. **探索与利用**：页面上的 DQN 总是选 Q 最大的方向（纯利用）；训练时它有一部分步是随机走的（ε 从 1 降到 0.05）。如果训练时从不随机走，会学成什么样？
+
+## 它是怎么做的
+
+```
+状态 (5, 10, 10) ─► 卷积3×3·32 ─► 卷积3×3·64 ─► 卷积3×3·64 ─► 全连接 256 ─► Q(上, 下, 左, 右)
+  ch0 蛇头  ch1 身体(头亮尾暗 1→0.15)  ch2 食物  ch3/ch4 当前方向 (dr, dc) 整版平面
+```
+
+| 层 | 参数个数 |
+|---|---|
+| 卷积 1（5→32，3×3） | 1,472 |
+| 卷积 2（32→64，3×3） | 18,496 |
+| 卷积 3（64→64，3×3） | 36,928 |
+| 全连接 1（6400→256） | 1,638,656 |
+| 全连接 2（256→4） | 1,028 |
+| **合计** | **1,696,580** |
+
+- **训练**（`train.py`）：Double DQN + 经验回放（uint8 量化，容量 50000）+ 目标网络（每 2000 步同步）+ ε 线性衰减（60000 步内从 1 降到 0.05）。Adam，学习率 1e-3，γ = 0.96，batch 128，Huber 损失。
+- **奖励**（`snake_env.py`）：吃到食物 +1；死亡 −1；每走一步 −0.01；靠近 / 远离食物 ±0.03；连续 2N² 步没吃到判饿死 −0.5。180° 掉头无效，按直行处理。
+- **关于训练**：网页里的模型是**事先在电脑上用 `train.py` 训练好、再导出到浏览器**的。训练纯 CPU、不需要 GPU；`train.py` 默认最多训练 15 分钟。**这个模型的训练步数和用时没有记录下来**（checkpoint 里只保存了权重和最后一次评估的均分），所以这里不写；想自己训练见下一节。
+- **成绩**（`results/result.json`，用 `python -m tools.eval_model` 重新生成）：
+
+| 评估（贪婪策略，固定种子 999） | 平均吃到 | 平均步数 | 单局最多 | 局数 |
+|---|---|---|---|---|
+| 和 `train.py` 最终评估相同（30 局） | 12.8 | 115.5 | 23 | 30 |
+| 和 `train.py` 训练中评估相同（20 局） | 12.95 | 119.5 | 23 | 20 |
+
+  浏览器里用的是 float16 权重；同样 30 局，float16 平均吃到 12.8，与 float32 相同。checkpoint 中记录的评估均分是 12.8。观战模式的开局顺序和这里的评估一样（种子 999），不敲掉神经元时，前 30 局就是上表那 30 局。
+
+- **浏览器端**（`play/js/`）：
+  - `snake_env.js` 逐行移植 `snake_env.py`；
+  - `pyrandom.js` 复现了 Python 的随机数（MT19937），同一种子的食物位置和 Python 完全一样；
+  - `brain_net.js` 用手写的前向和反向传播计算 Q 值、各层激活、梯度和贡献；
+  - `touchctl.js` 是手机竖屏的浮动摇杆和大圆键（Pointer Events，多点触控各自跟踪手指）；
+  - 模型是 `play/model/snake_cnn_fp16.js`（float16、base64），用普通 `<script>` 加载，所以双击 `index.html`（`file://`）就能运行。
+- **测试**（`tests/`）锁住这些对应关系：
+  - JS 随机数 = CPython；
+  - JS 环境逐步 = Python 环境；
+  - JS 网络的 Q 值、激活、梯度、“敲掉”后的结果 = PyTorch（误差 < 1e-4）；
+  - JS 贪婪对局的得分 = PyTorch；
+  - 输入特征名 = 环境实际写入的通道；
+  - 页面不依赖网络、体积不超标；
+  - 浏览器验收（可选，需本机 Edge）：电脑 1920×1080、1366×768 自检，手机 390×844、414×896、360×780、768×1024 触屏模拟（摇杆拖动、看大脑开关、整页不滚动、无横向溢出、无 JS 报错）。
+
+![全连接层敲掉一个神经元后（1366×768）](docs/img/knockout_1366x768.png)
+
+## 想自己训练或修改
+
+需要 Python 3.10+；测试还需要 Node.js。
+
+```bash
+pip install -r requirements.txt
+
+# 训练（纯 CPU；会覆盖 checkpoints/dqn_snake_best.pt，先备份）
+python train.py --grid 10 --max-minutes 15
+
+# 重新评估 -> results/result.json；导出模型并打发布包 -> play/ 与 release/*.zip
+python -m tools.eval_model
+python -m tools.build --release
+
+# 测试（需要 Node.js）；浏览器验收另需本机装有 Edge 或 Chrome（手机尺寸还需要 pip install playwright）
+python -m pytest
+python -m tools.browser_check --mobile --shots docs/img
+SNAKE_BROWSER_TEST=1 python -m pytest tests/test_browser.py
+```
+
+署名、系列名、仓库名都集中在 `credits.json`；改完运行 `python -m tools.fill_credits --release`，会重新生成 README、CITATION.cff、LICENSE、根目录 index.html、页面页脚和发布 zip。
+
+## 目录结构
+
+```
+index.html            根目录入口：自动跳到 play/index.html（GitHub Pages 和解压后双击都用它）
+.nojekyll             让 GitHub Pages 原样发布，不经 Jekyll
+play/                 网页（双击 index.html）
+  index.html
+  css/app.css         样式（含手机竖屏布局）
+  js/config.js        名称、预设档位、颜色（集中在这一个文件）
+  js/pyrandom.js      与 Python 一致的随机数
+  js/snake_env.js     贪吃蛇环境（移植自 snake_env.py）
+  js/brain_net.js     网络的前向 / 反向计算
+  js/touchctl.js      手机竖屏的浮动摇杆 + 大圆键
+  js/app.js           页面逻辑（三种模式、大脑面板、帮助、退出、手机布局）
+  js/credits.js       署名（由 credits.json 生成）
+  model/snake_cnn_fp16.js   导出的模型（float16）
+snake_env.py          环境
+model.py              SnakeCNN
+train.py              Double DQN 训练
+checkpoints/dqn_snake_best.pt   训练好的模型（float32）
+results/result.json   评估结果（README 中的数字都来自这里）
+tools/                构建、导出、评估、浏览器验收（电脑 + 手机尺寸）、署名填充
+tests/                一致性测试与页面检查
+docs/img/             截图
+```
+
+## 常见问题
+
+- **关掉页面后还有程序在跑吗？** 没有。这是纯静态网页，关掉标签页就全部结束，不留任何后台进程。右上角「退出」（手机在 ☰ 菜单里）会先停止所有计算，再尝试关闭标签页；浏览器不允许关闭时，会显示“已停止运行”。
+- **双击后是空白或提示模型没加载？** 先把整个 zip 解压，再双击解压出来的 `index.html`（或 `play/index.html`）；`play` 文件夹里的文件要放在一起。
+- **为什么说和 DQN 比“回合制”最公平？** DQN 想一步只要几毫秒；回合制下你想多久都行，比的是判断，不比手速。勾选「辅助」会提前显示 DQN 在同一局面的建议，只是给你看，不改规则、不改食物位置，也不替你走；开过辅助的局会在历局表里标出来。
+- **手机上怎么玩？** 竖屏打开，点「我来玩」：左手拖摇杆，右手按大圆键暂停 / 继续；「看大脑」随时打开大脑面板。观战和练习模式往下滑就能看到大脑面板。
+- **手机横屏可以吗？** 可以，但会提示竖屏体验更好；选择“仍然横屏继续”后用电脑布局，在棋盘上滑动控制。
+
+## 测试情况与已知限制
+
+- Microsoft Edge（Windows）：电脑 1920×1080 和 1366×768 两种窗口大小下跑过页面自检（三种模式、敲掉 / 恢复、大屏模式、帮助、退出），没有 JS 报错；手机 390×844、414×896、360×780（DPR 3）和 768×1024（DPR 2）用 DevTools 协议模拟触屏跑过场景检查（无横向溢出、「我来玩」整页不滚动、摇杆拖动改变蛇的方向、看大脑打开 / 关闭、无 JS 报错）。
+- Chrome 与 Edge 内核相同，但没有单独测；Firefox 未测。
+- **Safari / iPhone 需要在真实的 Mac 和 iPhone 上确认**，目前还没有实测；安卓真机也未实测，只有模拟。
+
+## 许可证与引用
+
+代码 MIT（见 `LICENSE`），文档与教学素材（README、截图、页面文字）CC BY 4.0（见 `LICENSE-docs`），使用请注明出处。引用信息见 `CITATION.cff`（GitHub 页面右侧的 “Cite this repository”）。第三方组件说明见 `THIRD_PARTY.md`。联系作者：gaoshuyao.mk@gmail.com。
+
+## AI 辅助开发声明
+
+代码由 Claude Code 辅助编写，经作者审阅。

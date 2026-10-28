@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>贪吃蛇 · 看懂 AI 的大脑</title>
+<script>
+  /* Collect every JS error (including failed <script> loads) for the self-test. */
+  window.__errors = [];
+  window.addEventListener("error", function (e) {
+    var t = e.target;
+    if (t && t !== window && (t.src || t.href)) window.__errors.push("load failed: " + (t.src || t.href));
+    else window.__errors.push(String(e.message || e.error || e));
+  }, true);
+  window.addEventListener("unhandledrejection", function (e) { window.__errors.push("promise: " + e.reason); });
+</script>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header id="top">
+  <div class="brand"><span class="logo" aria-hidden="true">🐍</span><span id="app-title">贪吃蛇 · 看懂 AI 的大脑</span><span id="app-title-short"></span></div>
+  <nav id="tabs" role="tablist" aria-label="模式">
+    <button class="tab" role="tab" data-mode="watch" data-tip="AI 自己玩，你看它的大脑怎么想（打开时的默认模式）">观战</button>
+    <button class="tab" role="tab" data-mode="play" data-tip="你用方向键玩同一局，每走一步揭晓 DQN 在同一局面会怎么走" data-anim="keys">我来玩</button>
+    <button class="tab" role="tab" data-mode="practice" data-tip="跟着任务清单一步步看懂这个网络，完成一项自动打勾">练习</button>
+  </nav>
+  <div class="spacer"></div>
+  <label class="switch" data-tip="把右边的大脑面板放大（左右比例 35:65），适合投影；快捷键 B"><input type="checkbox" id="ck-big"> 大屏模式</label>
+  <button id="btn-help" class="round" title="操作说明（H）" aria-label="操作说明">?</button>
+  <button id="btn-exit" class="exit" data-tip="停止所有计算并关闭页面">退出</button>
+  <!-- 手机竖屏：其余入口收进 ☰ 菜单 -->
+  <button id="menu-btn" aria-label="菜单" aria-expanded="false" aria-controls="menu">☰</button>
+  <div id="menu" role="menu" hidden>
+    <button role="menuitem" id="menu-help">操作说明</button>
+    <button role="menuitem" id="menu-restore">全部恢复（敲掉的神经元）</button>
+    <div class="sep"></div>
+    <button role="menuitem" id="menu-exit">退出</button>
+  </div>
+</header>
+
+<main id="main">
+  <section id="left">
+    <div class="card board-card">
+      <div class="pills" id="pills"></div>
+      <div id="board-wrap">
+        <canvas id="board" aria-label="棋盘"></canvas>
+        <div id="banner" hidden></div>
+        <div id="board-hint" hidden></div>
+      </div>
+    </div>
+    <div class="card" id="opts"></div>
+    <div class="card" id="controls"></div>
+    <div class="card" id="explain"></div>
+    <!-- 手机竖屏「我来玩」的操作区：左下浮动摇杆，右下大圆键 -->
+    <div id="touchctl" aria-label="触屏操作区">
+      <div id="mob-bar"><div id="mob-levels"></div><button id="btn-brain" type="button">看大脑</button><button id="tk-assist" type="button">辅助</button><button id="b-mnext" type="button">重开</button></div>
+      <div id="stick-zone"><span class="hint">左手：按住任意处拖动摇杆</span><div id="stick-base"><div id="stick-knob"></div></div></div>
+      <div id="btn-zone"><button class="tbtn tbig" id="tk-pause" data-tk="pause" type="button">暂停</button><div class="tbtn-hint" id="tk-hint"></div></div>
+    </div>
+  </section>
+
+  <section id="right">
+    <div class="card brain">
+      <div class="brain-head">
+        <div id="formula"></div>
+        <div class="brain-status"><span id="view-label"></span><span class="spacer"></span>
+          <span id="value-text" data-tip="局面价值估计 = 合法方向里最大的 Q 值：网络觉得“从现在起往后还能拿到多少奖励”。右边小曲线是它在这一局里的变化"></span><canvas id="value-curve"></canvas>
+          <span id="knock-info"></span>
+          <button id="btn-restore" class="mini-btn" data-tip="把所有被敲掉的神经元恢复原样">全部恢复</button></div>
+      </div>
+      <div id="brain-body">
+        <div class="layer" id="L-input">
+          <div class="lt" id="lt-input"></div>
+          <div class="lrow" id="row-input"></div>
+          <div class="note">归因 = 梯度 × 输入（对所选方向 Q 值的一阶近似），<span style="color:var(--pos)">橙</span>推高、<span style="color:var(--neg)">蓝</span>压低。<b>这是模型内部的相关性解释，不代表因果。</b></div>
+        </div>
+        <div class="layer conv" id="L-conv1"><div class="lt" id="lt-conv1"></div><div class="lrow"><div class="tops" id="tops-conv1"></div><canvas class="sq" id="sq-conv1" data-tip="全部通道：每个小方块是一个通道的平均激活。点一下 = 敲掉 / 恢复" data-anim="click"></canvas></div></div>
+        <div class="layer conv" id="L-conv2"><div class="lt" id="lt-conv2"></div><div class="lrow"><div class="tops" id="tops-conv2"></div><canvas class="sq" id="sq-conv2" data-tip="全部通道：每个小方块是一个通道的平均激活。点一下 = 敲掉 / 恢复" data-anim="click"></canvas></div></div>
+        <div class="layer conv" id="L-conv3"><div class="lt" id="lt-conv3"></div><div class="lrow"><div class="tops" id="tops-conv3"></div><canvas class="sq" id="sq-conv3" data-tip="全部通道：每个小方块是一个通道的平均激活。点一下 = 敲掉 / 恢复" data-anim="click"></canvas></div></div>
+        <div class="layer" id="L-fc">
+          <div class="lt" id="lt-fc"></div>
+          <canvas id="fc-canvas"></canvas>
+        </div>
+      </div>
+      <div id="brain-cover" hidden></div>
+    </div>
+  </section>
+</main>
+
+<footer id="foot"></footer>
+<button id="brain-close" type="button">返回游戏</button>
+<div id="rotate-hint" role="status" hidden><div><b>竖屏体验更佳</b>把手机竖过来：上面是棋盘，下面是摇杆和按键。<br><button id="rot-ok" type="button">仍然横屏继续</button></div></div>
+
+<div id="help" class="modal" hidden>
+  <div class="modal-box" role="dialog" aria-labelledby="help-title">
+    <div class="help-scroll">
+    <h2 id="help-title">30 秒上手</h2>
+    <div class="help-cards">
+      <div class="hc"><div class="demo demo-watch"><i class="d-snake"></i><i class="d-food"></i></div>
+        <h3>① 看</h3><p><span class="kbd-only">左边</span><span class="touch-only">上面</span>：蛇由一个训练好的神经网络（DQN）控制，自己在玩。<br><span class="kbd-only">右边</span><span class="touch-only">下面</span>：这个网络此刻的“大脑”——每一层的真实激活，和它给 4 个方向打的分（Q 值）。</p></div>
+      <div class="hc"><div class="demo demo-click"><i class="d-dot"></i><i class="d-dot"></i><i class="d-dot target"></i><i class="d-cursor"></i></div>
+        <h3>② 点</h3><p>大脑里每个小方块、小圆点都是神经元。<b>点一下就“敲掉”它</b>（输出变成 0），看蛇会不会变笨；「全部恢复」一键复原。</p></div>
+      <div class="hc"><div class="demo demo-keys kbd-only"><i class="k k-up">↑</i><i class="k k-left">←</i><i class="k k-down">↓</i><i class="k k-right">→</i></div>
+        <div class="demo demo-stick touch-only" aria-hidden="true"><svg viewBox="0 0 220 84" width="100%" height="84">
+          <circle cx="56" cy="42" r="30" fill="#1d2633" stroke="#3a4a60" stroke-width="2"/>
+          <path d="M56 18l-5 7h10zM56 66l-5-7h10zM32 42l7-5v10zM80 42l-7-5v10z" fill="#4a5a70"/>
+          <circle class="st-knob" cx="56" cy="42" r="13" fill="#4fc3f7"/>
+          <circle class="st-finger" cx="56" cy="42" r="9" fill="none" stroke="#fff" stroke-width="2"/>
+          <circle cx="166" cy="42" r="26" fill="#1d2633" stroke="#3a4a60" stroke-width="2"/>
+          <text x="166" y="47" text-anchor="middle" font-size="13" fill="#dde5ee" font-weight="bold">暂停</text>
+          <rect class="st-snake" x="104" y="36" width="34" height="12" rx="4" fill="#52ffa8"/>
+        </svg></div>
+        <h3>③ 玩</h3><p>顶部切到「我来玩」，<span class="kbd-only">用方向键或 WASD</span><span class="touch-only">左手按住屏幕下方任意处拖动摇杆（上下左右），右手的大圆键是暂停 / 继续；也可以直接在棋盘上滑动</span>。每走一步，揭晓 DQN 在同一局面会怎么走。</p></div>
+    </div>
+    <div class="keys-list kbd-only">
+      <span><kbd>空格</kbd> 播放 / 暂停</span><span><kbd>→</kbd> 或 <kbd>.</kbd> 单步（观战）</span><span><kbd>R</kbd> 重开</span>
+      <span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> 切换模式</span><span><kbd>B</kbd> 大屏模式</span><span><kbd>H</kbd> 或右上角 <kbd>?</kbd> 再看这页</span>
+    </div>
+    <div class="touch-list touch-only">
+      <span>观战 / 练习：往下滑看大脑；点方块、圆点敲掉神经元</span><span>我来玩：「看大脑」全屏打开大脑面板，「返回游戏」关闭</span><span>☰ 菜单里有操作说明、全部恢复、退出</span>
+    </div>
+    <p class="help-foot">这是纯静态网页：不联网、不装任何东西，关掉标签页就全部结束。</p>
+    </div>
+    <div class="help-actions"><button id="help-close" class="big-btn">开始看</button></div>
+  </div>
+</div>
+
+<div id="tip" hidden></div>
+<div id="toast"></div>
+<pre id="selftest" hidden></pre>
+
+<script src="js/config.js"></script>
+<script src="js/credits.js"></script>
+<script src="js/pyrandom.js"></script>
+<script src="js/snake_env.js"></script>
+<script src="js/brain_net.js"></script>
+<script src="model/snake_cnn_fp16.js"></script>
+<script src="js/touchctl.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

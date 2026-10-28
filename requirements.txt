@@ -1,0 +1,10 @@
+# 只有“想自己训练 / 评估 / 跑测试”才需要 Python；网页 play/ 不需要任何安装。
+numpy>=1.26
+# torch 用 CPU 版即可（本项目纯 CPU 训练/推理）。Linux: pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch>=2.2
+# Intel Mac 上 PyTorch 最后一版是 2.2.2，它只认 numpy 1.x
+numpy<2; sys_platform == "darwin" and platform_machine == "x86_64"
+# 测试（浏览器端与 PyTorch 一致性测试另需 Node.js）
+pytest>=8
+# 手机 / 电脑尺寸的浏览器验收（tools/browser_check.py --mobile）：用本机已装的 Edge，不下载浏览器
+# pip install playwright

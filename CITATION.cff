@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "如果在教学或研究中使用了本项目，请按以下信息引用。If you use this project, please cite it as below."
+title: "snake-dqn-brain: 贪吃蛇 · 看懂 AI 的大脑 (Snake DQN brain viewer)"
+type: software
+authors:
+  - family-names: Gao
+    given-names: Shuyao
+    email: "gaoshuyao.mk@gmail.com"
+    affiliation: "aSSIST University (Seoul School of Integrated Sciences and Technologies)"
+version: "1.0"
+date-released: "2026-10-14"
+license: MIT
+repository-code: "https://github.com/ShuyaoGao/snake-dqn-brain"
+url: "https://ShuyaoGao.github.io/snake-dqn-brain/play/"
+abstract: >-
+  A browser-only teaching demo (AI Teaching Demos): a convolutional Double DQN agent plays
+  Snake on a 10x10 grid while a live "brain panel" shows the real activations, contributions and
+  Q values computed from the trained weights. Includes a you-vs-DQN mode, knock-out of neurons,
+  and the full PyTorch training code.
+keywords:
+  - course-demo
+  - reinforcement-learning
+  - deep-q-network
+  - convolutional-neural-network

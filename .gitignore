@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+# release zip is uploaded to GitHub Releases, not committed
+release/
+# train.py also writes the "latest" checkpoint; only the best one is shipped
+checkpoints/dqn_snake.pt
